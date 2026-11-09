@@ -1,0 +1,11 @@
+# Local data and exports
+*.db
+*.sqlite
+*.sqlite3
+exports/
+backups/
+
+# Scratch
+.DS_Store
+Thumbs.db
+*.swp

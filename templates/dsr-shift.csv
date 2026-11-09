@@ -1,0 +1,2 @@
+date,business_day,shift,nozzle,product,rate_inr_per_litre,opening_reading,closing_reading,gross_litres,testing_litres,net_litres,sales_value_inr,collection_cash,collection_upi,collection_card,collection_credit,collected_total,short_excess_inr,attendant,supervisor_sign
+2026-01-15,2026-01-15,1,DU1-N1,HSD,90.00,124500.00,125410.00,910.00,5.00,905.00,81450.00,42000.00,21450.00,8000.00,10000.00,81450.00,0.00,Ramesh,________
