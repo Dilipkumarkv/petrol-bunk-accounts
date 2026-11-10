@@ -188,8 +188,11 @@ test('freezeDay refuses open shifts and missing dips, then freezes immutably', (
   const state = baseState();
   state.shifts = [{
     id: 's1', date: '2026-01-15', seq: 1, status: 'closed',
-    readings: { n1: { opening: 124500, closing: 125410, testing: 5 } },
-    tenders: { CASH: 8145000 }, attendant: 'Ramesh', signedAt: '2026-01-15T14:00:00Z',
+    readings: {
+      n1: { opening: 124500, closing: 125410, testing: 5 },
+      n2: { opening: 50000, closing: 50000, testing: 0 },
+    },
+    tenders: { CASH: 8145000 }, attendant: 'Ramesh', confirmed: true, signedAt: '2026-01-15T14:00:00Z',
   }];
   state.days['2026-01-15'] = {
     tanks: {
@@ -252,8 +255,11 @@ test('DSR csv is generated from the frozen snapshot, not live configuration', ()
   const state = baseState();
   state.shifts = [{
     id: 's1', date: '2026-01-15', seq: 1, status: 'closed',
-    readings: { n1: { opening: 124500, closing: 125410, testing: 5 } },
-    tenders: { CASH: 8145000 }, attendant: 'Ramesh',
+    readings: {
+      n1: { opening: 124500, closing: 125410, testing: 5 },
+      n2: { opening: 50000, closing: 50000, testing: 0 },
+    },
+    tenders: { CASH: 8145000 }, attendant: 'Ramesh', confirmed: true, signedAt: '2026-01-15T14:00:00Z',
   }];
   state.days['2026-01-15'] = {
     tanks: {

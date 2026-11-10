@@ -5,8 +5,8 @@ import {
   formatPaise,
   formatLitres,
   nozzleLitres,
-  readingIssues,
-  missingNozzleReadings,
+  validateShiftForClose,
+  validateBackup,
   shiftSummary,
   dayTotals,
   dayStock,
@@ -46,49 +46,6 @@ function demoState() {
     days: {},
     shifts: [],
   };
-}
-
-/**
- * Structural check before an imported backup replaces live data.
- * Returns a problem string, or null when the document is usable.
- */
-function backupError(data) {
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return 'not a JSON object';
-  if (data.version !== undefined && data.version !== 1) {
-    return `unsupported backup version ${data.version}`;
-  }
-  if (!data.outlet || typeof data.outlet !== 'object') return 'missing outlet details';
-  if (!Array.isArray(data.tanks) || data.tanks.length === 0) return 'missing tanks';
-
-  const tankIds = new Set();
-  for (const tank of data.tanks) {
-    if (!tank || typeof tank.id !== 'string' || !tank.id) return 'a tank has no id';
-    if (tank.product !== 'MS' && tank.product !== 'HSD') return `tank ${tank.code || tank.id} has an unknown product`;
-    tankIds.add(tank.id);
-  }
-
-  if (!Array.isArray(data.nozzles)) return 'missing nozzles';
-  for (const nozzle of data.nozzles) {
-    if (!nozzle || typeof nozzle.id !== 'string' || !nozzle.id) return 'a nozzle has no id';
-    if (!tankIds.has(nozzle.tankId)) {
-      return `nozzle ${nozzle.label || nozzle.id} points at a tank that does not exist`;
-    }
-  }
-
-  if (data.shifts !== undefined && !Array.isArray(data.shifts)) return 'shifts must be a list';
-  for (const shift of data.shifts || []) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(shift?.date || ''))) return 'a shift has an invalid date';
-    if (!Number.isInteger(shift.seq) || shift.seq < 1 || shift.seq > 3) return 'a shift has an invalid sequence';
-    if (shift.status !== 'open' && shift.status !== 'closed') return 'a shift has an invalid status';
-  }
-
-  if (data.days !== undefined && (typeof data.days !== 'object' || data.days === null || Array.isArray(data.days))) {
-    return 'days must be an object';
-  }
-  if (data.rates !== undefined && (typeof data.rates !== 'object' || data.rates === null || Array.isArray(data.rates))) {
-    return 'rates must be an object';
-  }
-  return null;
 }
 
 function load() {
@@ -271,10 +228,10 @@ function updateShiftCalc() {
     <div><span>Collected</span><strong>₹${formatPaise(summary.collectedPaise)}</strong></div>
     <div class="${diffClass}"><span>${diffLabel}</span><strong>₹${formatPaise(Math.abs(diff))}</strong></div>`;
 
-  renderIssues(shift, summary);
+  renderIssues(shift);
 }
 
-function renderIssues(shift, summary) {
+function renderIssues(shift) {
   const list = $('#shift-issues');
   const issues = [];
   let anyReading = false;
@@ -285,25 +242,22 @@ function renderIssues(shift, summary) {
     const touched = ['opening', 'closing', 'testing'].some(
       (f) => reading[f] !== '' && reading[f] !== undefined && reading[f] !== null,
     );
-    if (!touched) continue;
-    anyReading = true;
-    const prev = lastClosedReading(state, nozzle.id, shift.date, shift.seq);
-    for (const issue of readingIssues(reading, prev)) {
-      issues.push(`${nozzle.label}: ${issue}`);
-    }
+    if (touched) anyReading = true;
   }
 
   if (!anyReading && shift.status !== 'closed') {
     issues.push('Enter opening and closing readings for every nozzle — idle nozzles close at the same reading.');
   }
   if (shift.status !== 'closed' && anyReading) {
-    const missing = missingNozzleReadings(shift, state.nozzles);
-    if (missing.length && missing.length < state.nozzles.length) {
-      issues.push(`No reading yet for: ${missing.join(', ')}`);
+    const previousClosings = {};
+    for (const nozzle of state.nozzles) {
+      previousClosings[nozzle.id] = lastClosedReading(state, nozzle.id, shift.date, shift.seq);
     }
-  }
-  if (summary.missingRateProducts.length) {
-    issues.push(`Rate missing for ${summary.missingRateProducts.join(', ')} — set it in Setup → Rates before closing.`);
+    issues.push(...validateShiftForClose(shift, {
+      nozzles: state.nozzles,
+      rates: ratesFor(cur.date),
+      previousClosings,
+    }));
   }
   if (shift.status === 'closed') issues.length = 0;
 
@@ -338,36 +292,29 @@ function closeShift() {
   if (!shift) return toast('No nozzle readings entered.', true);
   if (shift.status === 'closed') return toast('This shift is already closed.', true);
 
-  // Every active nozzle must be accounted for, including idle ones.
-  const missing = missingNozzleReadings(shift, state.nozzles);
-  if (missing.length) {
-    return toast(`Enter opening and closing readings for: ${missing.join(', ')}`, true);
-  }
-
-  const issues = [];
+  const previousClosings = {};
   for (const nozzle of state.nozzles) {
-    const reading = shift.readings[nozzle.id];
-    if (!reading) continue;
-    const prev = lastClosedReading(state, nozzle.id, shift.date, shift.seq);
-    issues.push(...readingIssues(reading, prev).map((i) => `${nozzle.label}: ${i}`));
+    previousClosings[nozzle.id] = lastClosedReading(state, nozzle.id, shift.date, shift.seq);
   }
+  const issues = validateShiftForClose(shift, {
+    nozzles: state.nozzles,
+    rates: ratesFor(cur.date),
+    previousClosings,
+    requireSignoff: true,
+  });
   if (issues.length) {
-    renderIssues(shift, shiftSummary(shift, { nozzles: state.nozzles, rates: ratesFor(cur.date) }));
+    renderIssues(shift);
     return toast(issues[0], true);
   }
 
   const summary = shiftSummary(shift, { nozzles: state.nozzles, rates: ratesFor(cur.date) });
-  if (summary.missingRateProducts.length) {
-    return toast(`Set the rate for ${summary.missingRateProducts.join(', ')} in Setup → Rates first.`, true);
-  }
-  if (!shift.attendant.trim()) return toast('Attendant name is required.', true);
-  if (!shift.confirmed) return toast('The attendant must confirm and sign the drawer first.', true);
-  if (summary.differencePaise !== 0 && !shift.remark.trim()) {
-    return toast('A short/excess needs a remark before the shift can close.', true);
-  }
 
   shift.status = 'closed';
   shift.signedAt = new Date().toISOString();
+  // Stamp what this settlement was signed against: prices and the nozzle/tank
+  // mapping. Later setup edits apply to new shifts, not to this one.
+  shift.ratesPaise = { ...ratesFor(cur.date) };
+  shift.nozzlesSnapshot = state.nozzles.map((nozzle) => ({ ...nozzle }));
   save();
   toast(`Shift ${shift.seq} closed · ${summary.differencePaise === 0 ? 'balanced' : `₹${formatPaise(Math.abs(summary.differencePaise))} ${summary.differencePaise > 0 ? 'short' : 'excess'}`}`);
   renderShift();
@@ -778,12 +725,22 @@ function wire() {
   $('#rate-date').addEventListener('change', renderSetup);
   $('#save-rates').addEventListener('click', () => {
     const date = $('#rate-date').value;
-    state.rates[date] = {
+    const next = {
       MS: toPaise($('#rate-ms').value),
       HSD: toPaise($('#rate-hsd').value),
     };
+    // A zero rate would freeze a sale at zero value and block the day close.
+    const used = [...new Set(state.nozzles.map((n) => n.product))];
+    const missing = used.filter((product) => !(next[product] > 0));
+    if (missing.length) {
+      return toast(`Enter a rate above zero for ${missing.join(', ')}.`, true);
+    }
+    const hasClosed = state.shifts.some((s) => s.date === date && s.status === 'closed');
+    state.rates[date] = next;
     save();
-    toast(`Rates saved for ${date}.`);
+    toast(hasClosed
+      ? `Rates saved for ${date}. Closed shifts keep their original rates.`
+      : `Rates saved for ${date}.`);
     renderShift();
     renderDay();
   });
@@ -869,7 +826,7 @@ function wire() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result));
-        const problem = backupError(parsed);
+        const problem = validateBackup(parsed);
         if (problem) throw new Error(problem);
         state = parsed;
         state.days = state.days || {};
