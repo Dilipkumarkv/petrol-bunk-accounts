@@ -1,0 +1,117 @@
+# AGENTS.md
+
+Working notes for AI coding agents — and for anyone picking this repo up cold. Read this before changing code or documentation.
+
+## What this repo is
+
+Two things in one tree:
+
+1. **A research report** on how day-to-day accounting actually works at an Indian petrol bunk (registers, DSR, dip variance, MDG compliance, tax, software landscape).
+2. **A working, offline prototype** of the first three steps: shift settlement → day close → frozen DSR, with the reconciliation maths isolated in a tested engine.
+
+- Live: https://dilipkumarkv.github.io/petrol-bunk-accounts/ (app at `/app/`)
+- Repo: https://github.com/Dilipkumarkv/petrol-bunk-accounts
+
+## Commands
+
+| Task | Command | Notes |
+| --- | --- | --- |
+| Run tests | `npm test` | 11 tests, must stay green |
+| Serve locally | `npm start` | Serves `app/` at http://localhost:8123 |
+| Deploy | `git push origin main` | GitHub Pages rebuilds automatically |
+
+No `npm install`, no build step, no dependencies. If a change wants a dependency, that is a design decision to escalate, not a detail.
+
+### Environment quirks (Android/Termux workspace)
+
+- **Use `--test-isolation=none`** (already in `package.json`). Plain `node --test` spawns a child node with a flag this environment rejects (`expected absolute path: --heap-prof-interval=...`) and fails. Running `node test/core.test.mjs` directly also works.
+- **No `/tmp`.** Write scratch files inside the repo and delete them before committing, or redirect to a file you remove.
+- **`gh repo create --source .` fails** here: `gh` cannot exec `git` from the Termux prefix (`permission denied`). Use `gh api -X POST user/repos ...` to create a repo, then plain `git push` — the repo-local credential helper `!gh auth git-credential` is already configured.
+- Long command output can be truncated in the tool layer; redirect to a file and read it if a result looks cut off.
+
+## Layout
+
+```
+app/
+  core.mjs     pure engine: litres, money, variance, freeze, CSV. No DOM, no storage.
+  app.js       DOM + localStorage only; imports core.mjs
+  index.html   five views: Shift, Day close, DSR, Setup, Data
+  styles.css   light/dark, mobile-first
+test/
+  core.test.mjs  11 tests against the engine
+data/schema.sql  fuller target model (SQLite) — NOT wired to the app
+docs/            research: registers, reconciliation, compliance, software, sources
+index.html       Pages landing page
+```
+
+Storage: one JSON blob in `localStorage` under `petrolbunk.v1`, shaped by `demoState()` in `app.js`. There is no backend and no sync; Export JSON is the backup path.
+
+## Invariants — do not break these
+
+1. **Money is integer paise.** Never store floats of rupees. `toPaise` / `formatPaise` are the only converters.
+2. **Litres are rounded to 3 decimals** via `r3()`.
+3. **Net litres = gross − testing.** Testing fuel goes back into the tank; it is not a sale and must never be added back to stock.
+4. **Book stock = opening + receipts − net sales.** Adding testing litres again is the classic double count this repo already fixed once.
+5. **Short/excess sign: positive means short** (money missing). Every register in India writes short as a positive number regardless of sign convention in the maths.
+6. **A closed day is immutable.** `freezeDay()` returns a deep-frozen snapshot. Corrections must be new, attributed entries — never edits to a closed day.
+7. **Only closed shifts feed the DSR, stock variance and collections.** Open drafts are provisional and must stay out of the numbers.
+8. **No network, no CDN, no remote fonts.** The app must work from static hosting and offline.
+9. **Accessibility floor:** 44px touch targets, labelled inputs, visible focus, theme via CSS variables only (no hard-coded colours).
+
+If a request conflicts with one of these, say so and explain the trade-off instead of silently breaking it.
+
+## Adding a feature
+
+1. Write the maths in `app/core.mjs` as a pure function.
+2. Add a test to `test/core.test.mjs` that pins the behaviour (including the failure case).
+3. Wire it in `app/app.js` — rendering and storage only.
+4. Update the docs that claim something about it (`README.md` and the relevant file in `docs/`).
+5. Run `npm test`, then drive the real flow in the browser.
+
+## Verification protocol
+
+Never claim a change works from reading the diff.
+
+- `npm test` — all tests pass.
+- `npm start`, then exercise the actual flow: enter readings → close shift → enter dips → close day → read the DSR.
+- Check the browser console has no errors.
+- Check there is no horizontal overflow at phone width.
+- For hosted changes: push, poll `gh api repos/Dilipkumarkv/petrol-bunk-accounts/pages --jq .status` until `built`, then fetch the URL and confirm the new content is actually served (not a cached old build).
+
+## Deployment
+
+- Pages source is `main` / root, `https://dilipkumarkv.github.io/petrol-bunk-accounts/`.
+- The landing page is the repo-root `index.html`; the app is served from `/app/`.
+- `.nojekyll` is required — do not remove it.
+- Any push to `main` republishes the site. There is no staging environment.
+
+## Domain accuracy rules
+
+These are what make the repo useful rather than plausible-sounding:
+
+- **MDG numbers must trace to a source** in [`docs/sources.md`](docs/sources.md). Do not invent tolerance, evaporation or penalty figures. The 4% tank-stock band and the MS 0.75% evaporation allowance are cited; anything beyond them is marked as unverified.
+- **Illustrative figures stay labelled.** The worked example (905 L, ₹81,450, −50 L) is a teaching example, not market data.
+- **Two tax regimes:** petrol and diesel are outside GST (§9(2) CGST) and carry state VAT + excise; lubricants and shop goods are GST-bearing. Never merge the two sales registers.
+- **Dealer margin is business income**, not agency commission — don't reintroduce the 194H claim.
+
+## Docs map
+
+| Document | Owns |
+| --- | --- |
+| `README.md` | The report's front door: model, daily rhythm, DSR, app overview, status |
+| `docs/registers.md` | Which register exists, who fills it, when |
+| `docs/reconciliation.md` | The arithmetic and the worked example |
+| `docs/compliance-and-tax.md` | MDG, Legal Metrology, GST/VAT, TDS, audit |
+| `docs/software-and-repos.md` | SaaS landscape, open-source repos, gaps |
+| `docs/sources.md` | Every URL, what it supported, what was not verified |
+| `data/schema.sql` | Target data model (fuel volume, dips, receipts, credit, variance) |
+
+Keep the README's Contents table in sync when files are added or renamed.
+
+## Do not
+
+- Don't commit tokens or credentials. The GitHub token lives at `~/.gh-token`, outside the repo.
+- Don't add a backend, auth or analytics without asking — the app's selling point is that it is a static, local-only page.
+- Don't "tidy" historical numbers in a frozen DSR, or make a closed day editable.
+- Don't invent benchmarks, pricing or compliance figures to make docs look complete.
+- Don't reformat unrelated files in the same commit.

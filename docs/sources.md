@@ -60,3 +60,14 @@ Be careful with these if you are relying on them commercially:
 - **Evaporation slab details** beyond the first two bands (0.75%, 0.60%) were not read in full; the MDG text continues with further slabs.
 - Several vendor pages served only partial text when fetched; content used from them is limited to what was actually returned.
 - No interview with a working dealer or accountant. Numbers in the worked example are illustrative, not a real outlet's books.
+
+## Corrections made while building the app
+
+Turning the arithmetic into code (`app/core.mjs`) found one error in the first draft of these notes, now fixed in [reconciliation.md](reconciliation.md):
+
+- The worked example added the 5 testing litres back to book stock **on top of** net sales that already excluded them, double-counting fuel that never left the tank. Correct formula: `book_closing = opening + receipts - net_sales`, giving 19,095 L and a −50 L variance in the example (previously 19,100 L and −55 L).
+
+The implementation is the check on the prose: the engine's tests pin these rules (net = gross − testing; testing never re-added; closed days immutable), and any future doc edit must keep agreeing with them.
+
+No other figure in these notes was changed by the build.
+

@@ -4,7 +4,7 @@
 
 A working reference for **day-to-day account keeping at an Indian retail fuel outlet (petrol pump / petrol bunk)** — the registers, the daily rhythm, the arithmetic, the compliance points, and the software/tooling landscape.
 
-Written as a build-ready brief: the last section is a data model you can implement, and `data/schema.sql` is a starter SQLite schema for it.
+Built as a brief **and a working prototype**: the registers and the arithmetic are documented, and [app/](app/) implements shift settlement, day close and the frozen DSR. [data/schema.sql](data/schema.sql) is the fuller target model, and [AGENTS.md](AGENTS.md) records the conventions and invariants anyone (human or agent) should respect when changing the code.
 
 > Everything here is sourced from OMC guidelines (IOCL/HPCL MDG), dealer-facing guides and software vendors' own docs. Full links in [docs/sources.md](docs/sources.md). Figures marked *illustrative* are examples, not market data.
 
@@ -20,7 +20,9 @@ Written as a build-ready brief: the last section is a data model you can impleme
 | [data/schema.sql](data/schema.sql) | Starter SQLite schema (shift, nozzle, dip, receipt, credit, expense) |
 | [templates/dsr-shift.csv](templates/dsr-shift.csv) | A blank shift-DSR sheet you can open in Excel/Sheets |
 | [app/](app/) | Working offline app: shift settlement, day close, frozen DSR, CSV |
-| [test/](test/) | Unit tests for the reconciliation engine |
+| [test/](test/) | 11 unit tests for the reconciliation engine |
+| [index.html](index.html) | GitHub Pages landing page |
+| [AGENTS.md](AGENTS.md) | Conventions, invariants and commands for changing this repo |
 
 ## The mental model: three ledgers, one truth
 
@@ -98,10 +100,12 @@ A working, offline-first implementation of steps 1–3 below. No build step, no 
 
 **Hosted:** https://dilipkumarkv.github.io/petrol-bunk-accounts/app/
 
+```bash
+npm test     # 11 tests
+npm start    # serves app/ at http://localhost:8123
 ```
-cd app && python3 -m http.server 8123    # open http://localhost:8123
-node --test --test-isolation=none test/  # 11 tests, run from the repo root
-```
+
+No install and no build step — both scripts are thin wrappers over `node --test --test-isolation=none test/` and `python3 -m http.server 8123 --directory app`.
 
 What it does today:
 
@@ -116,6 +120,8 @@ Deliberate limits: rates are per date (not per 06:00 revision inside a shift), n
 
 `app/core.mjs` is pure: no DOM, no storage, every function a function of its inputs. That is what makes the money maths testable — the 11 tests cover testing-litre subtraction, carry-forward mismatch, short/excess sign, half-entered rows, the MDG band and evaporation allowance, multi-shift aggregation, frozen-day immutability and CSV export.
 
+Conventions that keep it correct are in [AGENTS.md](AGENTS.md): integer paise, litres at 3 decimals, net = gross − testing, book stock = opening + receipts − net sales, positive short, immutable closed days, and closed shifts only.
+
 ## Proposed build
 
 1. **Shift settlement first** — nozzle readings, testing litres, payment split, per-attendant short/excess. Nothing else matters if this is slow. *(done)*
@@ -129,4 +135,4 @@ Deliberate limits: rates are per date (not per 06:00 revision inside a shift), n
 
 ## Status
 
-Research, specification and a working prototype: shift settlement, day close and frozen DSR are implemented and tested ([app/](app/)). Next: tanker receipts with short-delivery notes, the khata ledger, and Tally export.
+Research, specification and a working prototype: shift settlement, day close and frozen DSR are implemented, tested (11 tests) and hosted on GitHub Pages ([app/](app/)). Next: tanker receipts with short-delivery notes, the khata ledger, and Tally export.
