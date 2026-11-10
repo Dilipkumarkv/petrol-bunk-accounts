@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Petrol Bunk Accounts — shift settlement, day close, DSR</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --surface:#fff; --text:#16181d; --muted:#616b7a; --border:#d9dee6; --accent:#0f6b4f; --accent-fg:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#101215; --surface:#191c21; --text:#eef1f5; --muted:#9aa4b2; --border:#2c333c; --accent:#4cc79b; --accent-fg:#06201a; } }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; background:var(--bg); color:var(--text);
+         font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:520px; width:100%; background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:24px; }
+  .mark { display:grid; place-items:center; width:44px; height:44px; border-radius:12px; background:color-mix(in srgb, var(--accent) 16%, transparent); font-size:22px; }
+  h1 { font-size:1.25rem; margin:14px 0 6px; letter-spacing:-0.01em; }
+  p { margin:0 0 10px; color:var(--muted); font-size:0.92rem; }
+  ul { margin:10px 0 18px; padding-left:18px; color:var(--muted); font-size:0.9rem; }
+  .cta { display:flex; gap:10px; flex-wrap:wrap; }
+  a.btn { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:11px 18px; border-radius:10px;
+          background:var(--accent); color:var(--accent-fg); text-decoration:none; font-weight:600; font-size:0.92rem; }
+  a.ghost { background:transparent; color:var(--text); border:1px solid var(--border); }
+  footer { margin-top:18px; font-size:0.78rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark" aria-hidden="true">⛽</div>
+  <h1>Petrol Bunk Accounts</h1>
+  <p>Shift settlement, day close and a frozen Daily Sales Report for an Indian fuel outlet — with the reconciliation maths worked out rather than assumed.</p>
+  <ul>
+    <li>Nozzle readings, testing litres, carry-forward checks</li>
+    <li>Cash / UPI / card / credit split with per-attendant short–excess</li>
+    <li>Tank dip variance against the MDG 4% band and evaporation allowance</li>
+    <li>Immutable DSR at day close, printable and CSV-exportable</li>
+  </ul>
+  <div class="cta">
+    <a class="btn" href="app/">Open the app</a>
+    <a class="btn ghost" href="README.md">Read the report</a>
+  </div>
+  <footer>Runs entirely in your browser; data stays in local storage. Export JSON for a real backup.</footer>
+</main>
+</body>
+</html>
