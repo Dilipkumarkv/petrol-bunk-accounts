@@ -1,5 +1,7 @@
 # Petrol Bunk Accounts (India)
 
+**Live app:** https://dilipkumarkv.github.io/petrol-bunk-accounts/app/ · **Landing page:** https://dilipkumarkv.github.io/petrol-bunk-accounts/ · **Repo:** https://github.com/Dilipkumarkv/petrol-bunk-accounts
+
 A working reference for **day-to-day account keeping at an Indian retail fuel outlet (petrol pump / petrol bunk)** — the registers, the daily rhythm, the arithmetic, the compliance points, and the software/tooling landscape.
 
 Written as a build-ready brief: the last section is a data model you can implement, and `data/schema.sql` is a starter SQLite schema for it.
@@ -93,6 +95,8 @@ Open source is thin and mostly student/portfolio projects: no OSS project with r
 ## The app
 
 A working, offline-first implementation of steps 1–3 below. No build step, no dependencies.
+
+**Hosted:** https://dilipkumarkv.github.io/petrol-bunk-accounts/app/
 
 ```
 cd app && python3 -m http.server 8123    # open http://localhost:8123
