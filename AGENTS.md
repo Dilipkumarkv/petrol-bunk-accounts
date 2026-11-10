@@ -16,7 +16,7 @@ Two things in one tree:
 
 | Task | Command | Notes |
 | --- | --- | --- |
-| Run tests | `npm test` | 11 tests, must stay green |
+| Run tests | `npm test` | 22 tests, must stay green |
 | Serve locally | `npm start` | Serves `app/` at http://localhost:8123 |
 | Deploy | `git push origin main` | GitHub Pages rebuilds automatically |
 
@@ -24,7 +24,7 @@ No `npm install`, no build step, no dependencies. If a change wants a dependency
 
 ### Environment quirks (Android/Termux workspace)
 
-- **Use `--test-isolation=none`** (already in `package.json`). Plain `node --test` spawns a child node with a flag this environment rejects (`expected absolute path: --heap-prof-interval=...`) and fails. Running `node test/core.test.mjs` directly also works.
+- **Use the exact `npm test` command** (`node --test --test-isolation=none test/*.test.mjs`). Two separate traps: plain `node --test` spawns a child node with a flag this environment rejects (`expected absolute path: --heap-prof-interval=...`), and passing the **directory** `test/` fails on Node 24 with `ERR_UNSUPPORTED_DIR_IMPORT` (Node 26 tolerates it). Pass the file glob.
 - **No `/tmp`.** Write scratch files inside the repo and delete them before committing, or redirect to a file you remove.
 - **`gh repo create --source .` fails** here: `gh` cannot exec `git` from the Termux prefix (`permission denied`). Use `gh api -X POST user/repos ...` to create a repo, then plain `git push` — the repo-local credential helper `!gh auth git-credential` is already configured.
 - Long command output can be truncated in the tool layer; redirect to a file and read it if a result looks cut off.
@@ -38,7 +38,8 @@ app/
   index.html   five views: Shift, Day close, DSR, Setup, Data
   styles.css   light/dark, mobile-first
 test/
-  core.test.mjs  11 tests against the engine
+  core.test.mjs  17 tests against the engine
+  flow.test.mjs  5 whole-day flow tests
 data/schema.sql  fuller target model (SQLite) — NOT wired to the app
 docs/            research: registers, reconciliation, compliance, software, sources
 index.html       Pages landing page
@@ -57,6 +58,11 @@ Storage: one JSON blob in `localStorage` under `petrolbunk.v1`, shaped by `demoS
 7. **Only closed shifts feed the DSR, stock variance and collections.** Open drafts are provisional and must stay out of the numbers.
 8. **No network, no CDN, no remote fonts.** The app must work from static hosting and offline.
 9. **Accessibility floor:** 44px touch targets, labelled inputs, visible focus, theme via CSS variables only (no hard-coded colours).
+10. **One validation path.** `validateShiftForClose()` in the engine is used by the close button, `freezeDay()` and backup import. Never re-implement those rules in the UI — a hand-edited backup must hit the same checks.
+11. **A closed shift is signed for what it shows.** Stamping `ratesPaise` and `nozzlesSnapshot` at close means later rate/price/setup edits cannot revalue or re-label it. Do not read live setup for a closed shift.
+12. **Every active nozzle must be read.** An idle nozzle closes at `opening === closing` (testing must be 0); it is never silently skipped.
+13. **Rates must be finite and > 0.** A missing, zero or negative rate is a blocking error anywhere sales exist.
+14. **Opening stock is explicit.** `freezeDay()` rejects a day whose tank has no opening quantity; it is not silently treated as zero.
 
 If a request conflicts with one of these, say so and explain the trade-off instead of silently breaking it.
 

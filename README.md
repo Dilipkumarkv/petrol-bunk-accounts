@@ -20,7 +20,7 @@ Built as a brief **and a working prototype**: the registers and the arithmetic a
 | [data/schema.sql](data/schema.sql) | Starter SQLite schema (shift, nozzle, dip, receipt, credit, expense) |
 | [templates/dsr-shift.csv](templates/dsr-shift.csv) | A blank shift-DSR sheet you can open in Excel/Sheets |
 | [app/](app/) | Working offline app: shift settlement, day close, frozen DSR, CSV |
-| [test/](test/) | 11 unit tests for the reconciliation engine |
+| [test/](test/) | 22 unit and flow tests for the reconciliation engine |
 | [index.html](index.html) | GitHub Pages landing page |
 | [AGENTS.md](AGENTS.md) | Conventions, invariants and commands for changing this repo |
 
@@ -101,11 +101,20 @@ A working, offline-first implementation of steps 1–3 below. No build step, no 
 **Hosted:** https://dilipkumarkv.github.io/petrol-bunk-accounts/app/
 
 ```bash
-npm test     # 11 tests
+npm test     # 22 tests
 npm start    # serves app/ at http://localhost:8123
 ```
 
-No install and no build step — both scripts are thin wrappers over `node --test --test-isolation=none test/` and `python3 -m http.server 8123 --directory app`.
+No install and no build step — both scripts are thin wrappers over `node --test --test-isolation=none test/*.test.mjs` and `python3 -m http.server 8123 --directory app`. CI runs the same suite on Node 24 and 26 (`.github/workflows/tests.yml`).
+
+### Validation rules (all enforced in the engine, used by both the UI and imports)
+
+- Every active nozzle needs a reading; an idle nozzle closes at the same reading with zero testing.
+- Carry-forward must match the previous shift's closing for that nozzle.
+- Rates must be finite and above zero for any product with sales.
+- A short/excess needs a remark, and the attendant must sign before a shift closes.
+- A day close requires an explicit opening stock, a physical dip for every tank, and every shift closed and signed.
+- A closed shift keeps the rates and nozzle/tank mapping stamped at close, so later setup edits cannot revalue it; the DSR and its CSV come only from the frozen snapshot.
 
 What it does today:
 
@@ -118,7 +127,9 @@ Deliberate limits: rates are per date (not per 06:00 revision inside a shift), n
 
 ### Engine design
 
-`app/core.mjs` is pure: no DOM, no storage, every function a function of its inputs. That is what makes the money maths testable — the 11 tests cover testing-litre subtraction, carry-forward mismatch, short/excess sign, half-entered rows, the MDG band and evaporation allowance, multi-shift aggregation, frozen-day immutability and CSV export.
+`app/core.mjs` is pure: no DOM, no storage, every function a function of its inputs. That is what makes the money maths testable — the 22 tests cover testing-litre subtraction, carry-forward mismatch, short/excess sign, half-entered rows, the MDG band and evaporation allowance, multi-shift aggregation, frozen-day immutability, CSV export, and a full two-shift day across two HSD tanks.
+
+`validateShiftForClose()` is the single validation path: the close button, `freezeDay()` and backup import all call it, so a hand-edited export cannot bypass what the UI enforces. `test/flow.test.mjs` exercises whole days (both shifts, all tanks, next-day carry-forward) rather than single functions.
 
 Conventions that keep it correct are in [AGENTS.md](AGENTS.md): integer paise, litres at 3 decimals, net = gross − testing, book stock = opening + receipts − net sales, positive short, immutable closed days, and closed shifts only.
 
@@ -135,4 +146,4 @@ Conventions that keep it correct are in [AGENTS.md](AGENTS.md): integer paise, l
 
 ## Status
 
-Research, specification and a working prototype: shift settlement, day close and frozen DSR are implemented, tested (11 tests) and hosted on GitHub Pages ([app/](app/)). Next: tanker receipts with short-delivery notes, the khata ledger, and Tally export.
+Research, specification and a working prototype: shift settlement, day close and frozen DSR are implemented, tested (22 tests) and hosted on GitHub Pages ([app/](app/)). Next: tanker receipts with short-delivery notes, the khata ledger, and Tally export.
