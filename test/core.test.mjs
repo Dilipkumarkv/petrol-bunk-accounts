@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import {
   nozzleLitres,
   readingIssues,
+  missingNozzleReadings,
   shiftSummary,
   stockReconciliation,
   dayTotals,
   dayStock,
+  daySalesByTank,
   freezeDay,
   lastClosedReading,
   dsrCsv,
@@ -28,7 +30,8 @@ const baseState = () => ({
     { id: 't1', code: 'T1', product: 'HSD', capacityL: 20000 },
     { id: 't2', code: 'T2', product: 'MS', capacityL: 15000 },
   ],
-  nozzles,
+  // Cloned per state: tests that mutate configuration must not leak into others.
+  nozzles: nozzles.map((n) => ({ ...n })),
   rates: { '2026-01-15': { MS: 10450, HSD: 9000 } },
   days: {},
   shifts: [],
@@ -61,7 +64,7 @@ test('reading validation catches the four ways a shift goes wrong', () => {
   assert.deepEqual(readingIssues({ opening: 100, closing: 200, testing: 5 }), []);
 
   const backwards = readingIssues({ opening: 200, closing: 100 });
-  assert.match(backwards.join(' '), /greater than opening/);
+  assert.match(backwards.join(' '), /less than opening/);
 
   const carried = readingIssues({ opening: 999, closing: 1100 }, 1000);
   assert.match(carried.join(' '), /Carry-forward mismatch/);
@@ -120,7 +123,7 @@ test('stock variance classifies against the MDG band and evaporation allowance',
   const gain = stockReconciliation({
     openingL: 12000, receiptsL: 8000, netSalesL: 905, physicalL: 19200, evaporationPct: 0.75,
   });
-  assert.equal(gain.status, 'investigate');
+  assert.equal(gain.status, 'gain');
 
   // No dip yet means no verdict, and no invented number.
   const pending = stockReconciliation({ openingL: 100, receiptsL: 0, netSalesL: 10 });
@@ -245,7 +248,7 @@ test('a half-entered reading stays out of the totals', () => {
   assert.equal(s.differencePaise, 0);
 });
 
-test('DSR csv carries per-nozzle rows and the day totals block', () => {
+test('DSR csv is generated from the frozen snapshot, not live configuration', () => {
   const state = baseState();
   state.shifts = [{
     id: 's1', date: '2026-01-15', seq: 1, status: 'closed',
@@ -258,11 +261,135 @@ test('DSR csv carries per-nozzle rows and the day totals block', () => {
       t2: { openingL: 10000, receiptsL: 0, physicalL: 10000 },
     },
   };
-  state.days['2026-01-15'].dsr = freezeDay(state, '2026-01-15');
-  const csv = dsrCsv(state, '2026-01-15');
-  const lines = csv.split('\n');
-  assert.match(lines[0], /"nozzle"/);
+  const snapshot = freezeDay(state, '2026-01-15');
+  state.days['2026-01-15'].dsr = snapshot;
+
+  const csv = dsrCsv(snapshot);
+  assert.match(csv.split('\n')[0], /"nozzle"/);
   assert.match(csv, /"DU1-N1"/);
   assert.match(csv, /"81450\.00"/);
   assert.match(csv, /"day totals"/);
+
+  // Changing rates, nozzle labels or readings after the close must not rewrite
+  // the historical export.
+  state.rates['2026-01-15'].HSD = 12000;
+  state.nozzles[0].label = 'RENAMED-N1';
+  state.shifts[0].readings.n1.closing = 999999;
+  const again = dsrCsv(snapshot);
+  assert.equal(again, csv);
+  assert.doesNotMatch(again, /RENAMED/);
+});
+
+test('sales are allocated to the tank the nozzle draws from, not to every tank of that product', () => {
+  const state = {
+    outlet: { name: 'Two Tank Fuels', omc: 'IOCL' },
+    settings: { evaporationPct: { MS: 0.75, HSD: 0 } },
+    tanks: [
+      { id: 't1', code: 'T1', product: 'HSD', capacityL: 20000 },
+      { id: 't2', code: 'T2', product: 'HSD', capacityL: 20000 },
+    ],
+    nozzles: [{ id: 'n1', label: 'DU1-N1', product: 'HSD', tankId: 't1' }],
+    rates: { '2026-01-15': { HSD: 9000 } },
+    days: {
+      '2026-01-15': {
+        tanks: {
+          t1: { openingL: 5000, receiptsL: 0, physicalL: 4900 }, // sold 100 L
+          t2: { openingL: 8000, receiptsL: 0, physicalL: 8000 }, // untouched
+        },
+      },
+    },
+    shifts: [{
+      id: 's1', date: '2026-01-15', seq: 1, status: 'closed',
+      readings: { n1: { opening: 1000, closing: 1100, testing: 0 } },
+      tenders: { CASH: 900000 }, attendant: 'Ramesh',
+    }],
+  };
+
+  const byTank = daySalesByTank(state, '2026-01-15');
+  assert.equal(byTank.t1, 100);
+  assert.equal(byTank.t2, undefined);
+
+  const [t1, t2] = dayStock(state, '2026-01-15');
+  assert.equal(t1.netSalesL, 100);
+  assert.equal(t1.bookClosing, 4900);
+  assert.equal(t1.varianceL, 0);
+  assert.equal(t1.status, 'within');
+  assert.equal(t2.netSalesL, 0);
+  assert.equal(t2.bookClosing, 8000);
+  assert.equal(t2.varianceL, 0);
+});
+
+test('a missing rate is a blocking error, not a zero-value sale', () => {
+  const shift = {
+    id: 's1', date: '2026-01-15', seq: 1, status: 'open',
+    readings: { n1: { opening: 0, closing: 100, testing: 0 } },
+    tenders: {},
+  };
+  const summary = shiftSummary(shift, { nozzles, rates: {} });
+  assert.equal(summary.salesValuePaise, 0);
+  assert.deepEqual(summary.missingRateProducts, ['HSD']);
+
+  const withRate = shiftSummary(shift, { nozzles, rates: { HSD: 9000 } });
+  assert.deepEqual(withRate.missingRateProducts, []);
+});
+
+test('freezeDay refuses a day whose sales have no rate', () => {
+  const state = baseState();
+  state.rates = {}; // rates never entered
+  state.shifts = [{
+    id: 's1', date: '2026-01-15', seq: 1, status: 'closed',
+    readings: { n1: { opening: 124500, closing: 125410, testing: 5 } },
+    tenders: {}, attendant: 'Ramesh', signedAt: '2026-01-15T14:00:00Z',
+  }];
+  state.days['2026-01-15'] = {
+    tanks: {
+      t1: { openingL: 12000, receiptsL: 8000, physicalL: 19095 },
+      t2: { openingL: 10000, receiptsL: 0, physicalL: 10000 },
+    },
+  };
+  assert.throws(() => freezeDay(state, '2026-01-15'), /rate/i);
+});
+
+test('an idle nozzle may close with identical readings', () => {
+  // No sale, no testing: opening === closing is legitimate.
+  assert.deepEqual(readingIssues({ opening: 1000, closing: 1000, testing: 0 }), []);
+  assert.deepEqual(readingIssues({ opening: 1000, closing: 1000 }), []);
+
+  // Testing litres without dispensed fuel is contradictory.
+  assert.match(
+    readingIssues({ opening: 1000, closing: 1000, testing: 5 }).join(' '),
+    /testing|no fuel/i,
+  );
+
+  // A meter cannot run backwards.
+  assert.match(readingIssues({ opening: 1000, closing: 900 }).join(' '), /less than opening/);
+});
+
+test('every active nozzle must be read before a shift can close', () => {
+  const shift = {
+    id: 's1', date: '2026-01-15', seq: 1, status: 'open',
+    readings: { n1: { opening: 0, closing: 100, testing: 0 } },
+  };
+  assert.deepEqual(missingNozzleReadings(shift, nozzles), ['DU1-N2']);
+  assert.deepEqual(missingNozzleReadings({ readings: {} }, nozzles), ['DU1-N1', 'DU1-N2']);
+  assert.deepEqual(missingNozzleReadings(shift, [nozzles[0]]), []);
+});
+
+test('a small stock gain is flagged, not absorbed as evaporation', () => {
+  const gain = stockReconciliation({
+    openingL: 12000, receiptsL: 8000, netSalesL: 905, physicalL: 19098, evaporationPct: 0.75,
+  });
+  assert.equal(gain.varianceL, 3);
+  assert.equal(gain.status, 'gain');
+  assert.equal(gain.unexplainedL, 3); // a gain is not "explained" by an evaporation allowance
+
+  const exact = stockReconciliation({
+    openingL: 12000, receiptsL: 8000, netSalesL: 905, physicalL: 19095, evaporationPct: 0.75,
+  });
+  assert.equal(exact.status, 'within');
+
+  const hugeGain = stockReconciliation({
+    openingL: 12000, receiptsL: 8000, netSalesL: 905, physicalL: 19895, evaporationPct: 0.75,
+  });
+  assert.equal(hugeGain.status, 'beyond-mdg');
 });

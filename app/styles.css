@@ -206,6 +206,7 @@ input:disabled { opacity: 0.6; }
 }
 .chip.within { background: var(--accent-soft); color: var(--accent); }
 .chip.investigate { background: var(--warning-soft); color: var(--warning); }
+.chip.gain { background: var(--warning-soft); color: var(--warning); }
 .chip.beyond-mdg { background: var(--danger-soft); color: var(--danger); }
 .chip.pending { background: var(--surface-2); color: var(--muted); }
 .chip.open { background: var(--warning-soft); color: var(--warning); }

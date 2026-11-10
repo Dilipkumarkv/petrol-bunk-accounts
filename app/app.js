@@ -6,6 +6,7 @@ import {
   formatLitres,
   nozzleLitres,
   readingIssues,
+  missingNozzleReadings,
   shiftSummary,
   dayTotals,
   dayStock,
@@ -45,6 +46,49 @@ function demoState() {
     days: {},
     shifts: [],
   };
+}
+
+/**
+ * Structural check before an imported backup replaces live data.
+ * Returns a problem string, or null when the document is usable.
+ */
+function backupError(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return 'not a JSON object';
+  if (data.version !== undefined && data.version !== 1) {
+    return `unsupported backup version ${data.version}`;
+  }
+  if (!data.outlet || typeof data.outlet !== 'object') return 'missing outlet details';
+  if (!Array.isArray(data.tanks) || data.tanks.length === 0) return 'missing tanks';
+
+  const tankIds = new Set();
+  for (const tank of data.tanks) {
+    if (!tank || typeof tank.id !== 'string' || !tank.id) return 'a tank has no id';
+    if (tank.product !== 'MS' && tank.product !== 'HSD') return `tank ${tank.code || tank.id} has an unknown product`;
+    tankIds.add(tank.id);
+  }
+
+  if (!Array.isArray(data.nozzles)) return 'missing nozzles';
+  for (const nozzle of data.nozzles) {
+    if (!nozzle || typeof nozzle.id !== 'string' || !nozzle.id) return 'a nozzle has no id';
+    if (!tankIds.has(nozzle.tankId)) {
+      return `nozzle ${nozzle.label || nozzle.id} points at a tank that does not exist`;
+    }
+  }
+
+  if (data.shifts !== undefined && !Array.isArray(data.shifts)) return 'shifts must be a list';
+  for (const shift of data.shifts || []) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(shift?.date || ''))) return 'a shift has an invalid date';
+    if (!Number.isInteger(shift.seq) || shift.seq < 1 || shift.seq > 3) return 'a shift has an invalid sequence';
+    if (shift.status !== 'open' && shift.status !== 'closed') return 'a shift has an invalid status';
+  }
+
+  if (data.days !== undefined && (typeof data.days !== 'object' || data.days === null || Array.isArray(data.days))) {
+    return 'days must be an object';
+  }
+  if (data.rates !== undefined && (typeof data.rates !== 'object' || data.rates === null || Array.isArray(data.rates))) {
+    return 'rates must be an object';
+  }
+  return null;
 }
 
 function load() {
@@ -250,13 +294,16 @@ function renderIssues(shift, summary) {
   }
 
   if (!anyReading && shift.status !== 'closed') {
-    issues.push('Enter closing readings to begin — opening fills in from the last closed shift.');
+    issues.push('Enter opening and closing readings for every nozzle — idle nozzles close at the same reading.');
   }
-  if (summary.lines.length > 0) {
-    const missingRate = Object.keys(summary.litresByProduct).filter((code) => !ratesFor(cur.date)[code]);
-    if (missingRate.length) {
-      issues.push(`Rate missing for ${missingRate.join(', ')} — set it in Setup → Rates.`);
+  if (shift.status !== 'closed' && anyReading) {
+    const missing = missingNozzleReadings(shift, state.nozzles);
+    if (missing.length && missing.length < state.nozzles.length) {
+      issues.push(`No reading yet for: ${missing.join(', ')}`);
     }
+  }
+  if (summary.missingRateProducts.length) {
+    issues.push(`Rate missing for ${summary.missingRateProducts.join(', ')} — set it in Setup → Rates before closing.`);
   }
   if (shift.status === 'closed') issues.length = 0;
 
@@ -291,27 +338,30 @@ function closeShift() {
   if (!shift) return toast('No nozzle readings entered.', true);
   if (shift.status === 'closed') return toast('This shift is already closed.', true);
 
+  // Every active nozzle must be accounted for, including idle ones.
+  const missing = missingNozzleReadings(shift, state.nozzles);
+  if (missing.length) {
+    return toast(`Enter opening and closing readings for: ${missing.join(', ')}`, true);
+  }
+
   const issues = [];
-  let counted = 0;
   for (const nozzle of state.nozzles) {
     const reading = shift.readings[nozzle.id];
     if (!reading) continue;
-    const touched = ['opening', 'closing', 'testing'].some(
-      (f) => reading[f] !== '' && reading[f] !== undefined && reading[f] !== null,
-    );
-    if (!touched) continue;
-    counted += 1;
     const prev = lastClosedReading(state, nozzle.id, shift.date, shift.seq);
     issues.push(...readingIssues(reading, prev).map((i) => `${nozzle.label}: ${i}`));
   }
-  if (counted === 0) return toast('No nozzle readings entered.', true);
   if (issues.length) {
     renderIssues(shift, shiftSummary(shift, { nozzles: state.nozzles, rates: ratesFor(cur.date) }));
     return toast(issues[0], true);
   }
+
+  const summary = shiftSummary(shift, { nozzles: state.nozzles, rates: ratesFor(cur.date) });
+  if (summary.missingRateProducts.length) {
+    return toast(`Set the rate for ${summary.missingRateProducts.join(', ')} in Setup → Rates first.`, true);
+  }
   if (!shift.attendant.trim()) return toast('Attendant name is required.', true);
   if (!shift.confirmed) return toast('The attendant must confirm and sign the drawer first.', true);
-  const summary = shiftSummary(shift, { nozzles: state.nozzles, rates: ratesFor(cur.date) });
   if (summary.differencePaise !== 0 && !shift.remark.trim()) {
     return toast('A short/excess needs a remark before the shift can close.', true);
   }
@@ -326,7 +376,8 @@ function closeShift() {
 
 function discardDraft() {
   const shift = shiftFor(cur.date, cur.seq, false);
-  if (!shift || shift.status === 'closed') return toast('Nothing to discard.', true);  state.shifts = state.shifts.filter((s) => s.id !== shift.id);
+  if (!shift || shift.status === 'closed') return toast('Nothing to discard.', true);
+  state.shifts = state.shifts.filter((s) => s.id !== shift.id);
   save();
   toast('Draft discarded.');
   renderShift();
@@ -403,6 +454,7 @@ function updateDayCalc() {
       line.variancePct === null ? '—' : `${line.variancePct.toFixed(2)}%`;
     const labels = {
       within: 'within allowance',
+      gain: 'gain — investigate',
       investigate: 'investigate',
       'beyond-mdg': 'beyond MDG band',
       pending: 'dip pending',
@@ -414,7 +466,7 @@ function updateDayCalc() {
   const varianceTotal = stock.reduce((a, s) => a + (s.varianceL || 0), 0);
   const diff = totals.differencePaise;
   const litres = Object.values(totals.litresByProduct).reduce((a, b) => a + b, 0);
-  const missingRates = PRODUCTS.filter((p) => totals.litresByProduct[p.code] > 0 && !ratesFor(cur.day)[p.code]);
+  const missingRates = totals.missingRateProducts || [];
 
   $('#day-summary').innerHTML = `
     <div class="card-head"><h2>Day summary</h2><span class="hint">${esc(cur.day)}</span></div>
@@ -432,7 +484,7 @@ function updateDayCalc() {
     </div>
     ${PRODUCTS.filter((p) => totals.litresByProduct[p.code]).map((p) =>
       `<div class="hint">${esc(p.label)}: ${formatLitres(totals.litresByProduct[p.code])} L · ₹${formatPaise(totals.valueByProduct[p.code] || 0)}</div>`).join('')}
-    ${missingRates.length ? `<div class="hint">Rate missing for ${missingRates.map((p) => p.code).join(', ')} — set it in Setup → Rates.</div>` : ''}`;
+    ${missingRates.length ? `<div class="hint">Rate missing for ${missingRates.join(', ')} — the day cannot be closed until it is set in Setup → Rates.</div>` : ''}`;
 
   $('#variance-note').textContent =
     'Book = opening + receipts − net sales (testing litres already excluded). ' +
@@ -697,7 +749,9 @@ function wire() {
   });
   $('#print-dsr').addEventListener('click', () => window.print());
   $('#csv-dsr').addEventListener('click', () => {
-    downloadFile(`dsr-${cur.dsr}.csv`, dsrCsv(state, cur.dsr), 'text/csv;charset=utf-8');
+    const snapshot = state.days?.[cur.dsr]?.dsr;
+    if (!snapshot) return toast('Close the day first — the CSV is generated from the frozen DSR.', true);
+    downloadFile(`dsr-${cur.dsr}.csv`, dsrCsv(snapshot), 'text/csv;charset=utf-8');
   });
 
   // setup
@@ -805,7 +859,8 @@ function wire() {
 
   // data
   $('#export-json').addEventListener('click', () => {
-    downloadFile(`petrol-bunk-${todayISO()}.json`, JSON.stringify(state, null, 2), 'application/json');
+    const payload = { ...state, version: 1, exportedAt: new Date().toISOString() };
+    downloadFile(`petrol-bunk-${todayISO()}.json`, JSON.stringify(payload, null, 2), 'application/json');
   });
   $('#import-json').addEventListener('change', (e) => {
     const file = e.target.files?.[0];
@@ -814,9 +869,8 @@ function wire() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result));
-        if (!parsed || !Array.isArray(parsed.tanks) || !Array.isArray(parsed.nozzles)) {
-          throw new Error('Not a petrol bunk backup.');
-        }
+        const problem = backupError(parsed);
+        if (problem) throw new Error(problem);
         state = parsed;
         state.days = state.days || {};
         state.shifts = state.shifts || [];
@@ -833,6 +887,11 @@ function wire() {
     e.target.value = '';
   });
   $('#load-demo').addEventListener('click', () => {
+    const hasData = state.shifts.length > 0
+      || Object.keys(state.days || {}).some((d) => state.days[d]?.dsr);
+    if (hasData && !window.confirm(
+      'Load demo data? This replaces every shift, day and frozen DSR on this device. Export a backup first if you need it.',
+    )) return;
     state = demoState();
     save();
     renderAll();

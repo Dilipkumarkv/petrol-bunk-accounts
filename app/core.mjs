@@ -80,16 +80,17 @@ export function readingIssues(reading = {}, previousClosing = null) {
     return issues;
   }
 
-  const { opening, closing, testing, gross, net } = nozzleLitres(reading);
-  if (closing <= opening) {
-    issues.push(`Closing (${closing}) must be greater than opening (${opening}).`);
+  const { opening, closing, testing, gross } = nozzleLitres(reading);
+  // An idle nozzle legitimately closes at the same reading: no sale, no testing.
+  if (closing < opening) {
+    issues.push(`Closing (${closing}) cannot be less than opening (${opening}).`);
   }
   if (testing < 0) issues.push('Testing litres cannot be negative.');
   if (testing > gross) {
     issues.push(`Testing litres (${testing}) exceed gross litres (${gross}).`);
   }
-  if (net <= 0 && gross > 0) {
-    issues.push('Net litres are zero or negative after testing.');
+  if (testing > 0 && gross === 0) {
+    issues.push('Testing litres recorded with no fuel dispensed.');
   }
   if (previousClosing !== null && Math.abs(opening - previousClosing) > 0.001) {
     issues.push(
@@ -97,6 +98,21 @@ export function readingIssues(reading = {}, previousClosing = null) {
     );
   }
   return issues;
+}
+
+/**
+ * Nozzles that still have no reading for this shift. Closing a shift without
+ * every active nozzle means the day's stock quietly under-counts sales.
+ */
+export function missingNozzleReadings(shift = {}, nozzles = []) {
+  const readings = shift.readings || {};
+  const has = (v) => v !== '' && v !== null && v !== undefined;
+  return nozzles
+    .filter((nozzle) => {
+      const reading = readings[nozzle.id];
+      return !reading || !has(reading.opening) || !has(reading.closing);
+    })
+    .map((nozzle) => nozzle.label);
 }
 
 /**
@@ -111,6 +127,7 @@ export function shiftSummary(shift = {}, ctx = {}) {
   const lines = [];
   const litresByProduct = {};
   const valueByProduct = {};
+  const missingRateSet = new Set();
 
   for (const nozzle of nozzles) {
     const reading = readings[nozzle.id];
@@ -122,12 +139,15 @@ export function shiftSummary(shift = {}, ctx = {}) {
     const calc = nozzleLitres(reading);
     const ratePaise = Number(rates[nozzle.product]) || 0;
     const valuePaise = Math.round(calc.net * ratePaise);
-    if (calc.gross === 0 && calc.net === 0 && !reading.closing) continue;
+    // A rate of zero is never a real fuel price: it means the rate was not set.
+    if (calc.net > 0 && !ratePaise) missingRateSet.add(nozzle.product);
 
     lines.push({
       nozzleId: nozzle.id,
       label: nozzle.label,
       product: nozzle.product,
+      opening: calc.opening,
+      closing: calc.closing,
       gross: calc.gross,
       testing: calc.testing,
       net: calc.net,
@@ -161,6 +181,9 @@ export function shiftSummary(shift = {}, ctx = {}) {
     // matters: every register in India writes "short" as a positive number.
     differencePaise: salesValuePaise - collectedPaise,
     creditPaise: collections.CREDIT + collections.FLEET,
+    // Non-empty means the shift cannot be closed: a sale with no rate would be
+    // frozen into the DSR at zero value.
+    missingRateProducts: [...missingRateSet],
   };
 }
 
@@ -193,15 +216,19 @@ export function stockReconciliation(input = {}) {
     };
   }
 
-  const varianceL = r3(physical - bookClosing); // negative = loss
+  const varianceL = r3(physical - bookClosing); // negative = loss, positive = gain
   const variancePct = physical === 0 ? 0 : (varianceL / physical) * 100;
-  // Loss inside the evaporation/handling allowance is explainable; anything
-  // beyond the 4% band is what MDG calls beyond permissible limits.
-  const unexplainedL = r3(varianceL + evaporationAllowL); // negative = still lost
-  const lossL = Math.abs(varianceL);
+  const lossL = varianceL < 0 ? -varianceL : 0;
+  const gainL = varianceL > 0 ? varianceL : 0;
+  // The evaporation/handling allowance can only ever offset a LOSS. Fuel that
+  // appears in the tank is never explained by evaporation: it points at a
+  // meter, calibration or dip error, so it gets its own status instead of
+  // being absorbed as "within allowance".
+  const unexplainedL = varianceL < 0 ? r3(varianceL + evaporationAllowL) : varianceL;
 
   let status = 'within';
-  if (lossL > toleranceBandL) status = 'beyond-mdg';
+  if (Math.abs(varianceL) > toleranceBandL) status = 'beyond-mdg';
+  else if (gainL > 0) status = 'gain';
   else if (lossL > evaporationAllowL) status = 'investigate';
 
   return {
@@ -234,7 +261,10 @@ export function dayTotals(state, date) {
     differencePaise: 0,
     creditPaise: 0,
     drawers: [],
+    missingRateProducts: [],
   };
+
+  const missingRates = new Set();
 
   for (const shift of shifts) {
     const only = state.nozzles || [];
@@ -255,6 +285,7 @@ export function dayTotals(state, date) {
     totals.collectedPaise += summary.collectedPaise;
     totals.creditPaise += summary.creditPaise;
     totals.lines.push(...summary.lines);
+    for (const product of summary.missingRateProducts) missingRates.add(product);
     totals.drawers.push({
       shiftId: shift.id,
       seq: shift.seq,
@@ -267,19 +298,46 @@ export function dayTotals(state, date) {
   }
 
   totals.differencePaise = totals.salesValuePaise - totals.collectedPaise;
+  totals.missingRateProducts = [...missingRates];
   return totals;
 }
 
-/** Stock lines for every tank on a date, using that day's sales by product. */
+/**
+ * Litres sold per tank, from the nozzles that actually draw from it.
+ *
+ * A product can sit in several tanks; allocating the product total to every one
+ * of them would subtract the same litres more than once and make every tank's
+ * book stock (and variance) wrong.
+ */
+export function daySalesByTank(state, date) {
+  const nozzleIndex = new Map((state.nozzles || []).map((n) => [n.id, n]));
+  const has = (v) => v !== '' && v !== null && v !== undefined;
+  const byTank = {};
+
+  const shifts = (state.shifts || []).filter((s) => s.date === date && s.status === 'closed');
+  for (const shift of shifts) {
+    for (const [nozzleId, reading] of Object.entries(shift.readings || {})) {
+      const nozzle = nozzleIndex.get(nozzleId);
+      if (!nozzle || !reading) continue;
+      if (!has(reading.opening) || !has(reading.closing)) continue;
+      const { net } = nozzleLitres(reading);
+      if (!net) continue;
+      byTank[nozzle.tankId] = r3((byTank[nozzle.tankId] || 0) + net);
+    }
+  }
+  return byTank;
+}
+
+/** Stock lines for every tank on a date, using sales from that tank's nozzles. */
 export function dayStock(state, date) {
-  const totals = dayTotals(state, date);
+  const salesByTank = daySalesByTank(state, date);
   const day = (state.days || {})[date] || {};
   const tanks = state.tanks || [];
   const tankInputs = day.tanks || {};
 
   return tanks.map((tank) => {
     const input = tankInputs[tank.id] || {};
-    const netSalesL = totals.litresByProduct[tank.product] || 0;
+    const netSalesL = salesByTank[tank.id] || 0;
     const evaporationPct = Number(
       (state.settings?.evaporationPct || {})[tank.product] ?? (tank.product === 'MS' ? 0.75 : 0),
     );
@@ -316,10 +374,35 @@ export function freezeDay(state, date, meta = {}) {
   if (openShifts > 0) {
     throw new Error(`${openShifts} shift(s) still open — close them before closing the day.`);
   }
+  if (totals.missingRateProducts.length > 0) {
+    throw new Error(
+      `Rate missing for ${totals.missingRateProducts.join(', ')} — set the day's rates before closing.`,
+    );
+  }
   const pendingDips = stock.filter((s) => s.physical === null);
   if (pendingDips.length > 0) {
     throw new Error(`Physical dip missing for: ${pendingDips.map((s) => s.tank.code).join(', ')}.`);
   }
+
+  // Per-shift detail is part of the frozen record: the CSV and any later export
+  // must be reproducible from the snapshot alone, never from live configuration.
+  const frozenShifts = (state.shifts || [])
+    .filter((s) => s.date === date && s.status === 'closed')
+    .sort((a, b) => a.seq - b.seq)
+    .map((s) => {
+      const summary = shiftSummary(s, {
+        nozzles: state.nozzles,
+        rates: (state.rates || {})[date] || {},
+      });
+      return {
+        seq: s.seq,
+        attendant: s.attendant || '',
+        signedAt: s.signedAt || null,
+        tenders: summary.collections,
+        differencePaise: summary.differencePaise,
+        lines: summary.lines.map((line) => ({ ...line })),
+      };
+    });
 
   const snapshot = {
     date,
@@ -328,6 +411,7 @@ export function freezeDay(state, date, meta = {}) {
     outlet: state.outlet?.name || '',
     omc: state.outlet?.omc || '',
     totals,
+    shifts: frozenShifts,
     stock: stock.map((s) => ({
       tankId: s.tank.id,
       code: s.tank.code,
@@ -368,42 +452,45 @@ export function lastClosedReading(state, nozzleId, beforeDate = null, beforeSeq 
   return best ? best.closing : null;
 }
 
-/** CSV for the accountant: one row per nozzle per shift. */
-export function dsrCsv(state, date) {
-  const snapshot = state.days?.[date]?.dsr;
+/** CSV for the accountant, built only from a frozen DSR snapshot. */
+export function dsrCsv(snapshot) {
+  if (!snapshot) throw new Error('No frozen DSR for this date.');
+
   const head = [
     'date', 'shift', 'nozzle', 'product', 'rate_inr_per_litre',
     'opening', 'closing', 'gross_litres', 'testing_litres', 'net_litres', 'value_inr',
     'cash', 'upi', 'card', 'credit', 'fleet', 'short_excess_inr', 'attendant',
   ];
   const rows = [head];
-  const shifts = (state.shifts || []).filter((s) => s.date === date).sort((a, b) => a.seq - b.seq);
-  for (const shift of shifts) {
-    const summary = shiftSummary(shift, { nozzles: state.nozzles, rates: state.rates?.[date] || {} });
-    for (const line of summary.lines) {
-      const raw = shift.readings[line.nozzleId];
-      rows.push([
-        date, shift.seq, line.label, line.product, (line.ratePaise / 100).toFixed(2),
-        line.gross + line.testing === 0 ? '' : raw.opening,
-        raw.closing ?? '',
-        line.gross.toFixed(3), line.testing.toFixed(3), line.net.toFixed(3),
-        (line.valuePaise / 100).toFixed(2),
-        ...TENDERS.map((t) => ((shift.tenders?.[t.code] || 0) / 100).toFixed(2)),
-        (summary.differencePaise / 100).toFixed(2),
-        shift.attendant || '',
-      ]);
+
+  if (Array.isArray(snapshot.shifts)) {
+    for (const shift of snapshot.shifts) {
+      for (const line of shift.lines || []) {
+        rows.push([
+          snapshot.date, shift.seq, line.label, line.product, (line.ratePaise / 100).toFixed(2),
+          line.opening ?? '', line.closing ?? '',
+          line.gross.toFixed(3), line.testing.toFixed(3), line.net.toFixed(3),
+          (line.valuePaise / 100).toFixed(2),
+          ...TENDERS.map((t) => ((shift.tenders?.[t.code] || 0) / 100).toFixed(2)),
+          (shift.differencePaise / 100).toFixed(2),
+          shift.attendant || '',
+        ]);
+      }
     }
+  } else {
+    // Snapshots frozen before per-shift detail existed: totals block only.
+    rows.push(['note', 'snapshot has no per-shift detail (older app version)']);
   }
-  if (snapshot) {
-    rows.push([]);
-    rows.push(['day totals']);
-    rows.push(['date', 'sales_inr', 'collected_inr', 'short_excess_inr']);
-    rows.push([
-      date,
-      (snapshot.totals.salesValuePaise / 100).toFixed(2),
-      (snapshot.totals.collectedPaise / 100).toFixed(2),
-      (snapshot.totals.differencePaise / 100).toFixed(2),
-    ]);
-  }
+
+  rows.push([]);
+  rows.push(['day totals']);
+  rows.push(['date', 'sales_inr', 'collected_inr', 'short_excess_inr']);
+  rows.push([
+    snapshot.date,
+    (snapshot.totals.salesValuePaise / 100).toFixed(2),
+    (snapshot.totals.collectedPaise / 100).toFixed(2),
+    (snapshot.totals.differencePaise / 100).toFixed(2),
+  ]);
+
   return rows.map((row) => row.map((cell) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
 }

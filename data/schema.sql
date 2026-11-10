@@ -85,13 +85,14 @@ CREATE TABLE shift_nozzle (
 );
 
 -- Per-attendant cash accountability. Signed at the moment of counting, not later.
+-- Sign convention matches the app: POSITIVE means SHORT (money missing).
 CREATE TABLE attendant_drawer (
     id              INTEGER PRIMARY KEY,
     shift_id        INTEGER NOT NULL REFERENCES shift(id),
     attendant       TEXT NOT NULL,
     expected_paise  INTEGER NOT NULL,
     cash_paise      INTEGER NOT NULL,
-    difference_paise INTEGER GENERATED ALWAYS AS (cash_paise - expected_paise) VIRTUAL,
+    difference_paise INTEGER GENERATED ALWAYS AS (expected_paise - cash_paise) VIRTUAL,
     signed_at       TEXT,
     remark          TEXT
 );
