@@ -42,9 +42,11 @@ Notes:
 ## 3. Stock reconciliation (per tank, per day)
 
 ```
-book_closing = opening_stock + receipts - net_sales - testing_returned
+book_closing = opening_stock + receipts - net_sales
 variance     = physical_dip_litres - book_closing      # negative = loss
 ```
+
+`net_sales` is already net of testing litres (gross − testing), because the 5-litre MDG check goes back into the tank. Adding testing litres back a second time is the most common stock-maths error: it silently inflates book stock in both the register and the variance.
 
 Where:
 
@@ -106,19 +108,18 @@ Variant: if cash counted were ₹41,850, the shift shows **short ₹150**, signe
 | --- | --- |
 | Opening dip (06:00) | 12,000 |
 | Tanker receipt decanted | 8,000 |
-| Net sales | 905 |
-| Testing returned to tank | +5 |
-| Book closing | 19,100 |
+| Net sales (already excludes testing) | 905 |
+| Book closing | 19,095 |
 | Physical dip (22:00) | 19,045 |
-| **Variance** | **−55 L (−0.29% of tank stock)** |
+| **Variance** | **−50 L (−0.26% of tank stock)** |
 
 Interpretation:
 
 - 4% of 19,045 L ≈ 762 L — the variance is far inside the MDG outer band.
 - Evaporation allowance at 0.75% of 905 L sold ≈ 6.8 L.
-- So ~48 L of the shortfall is unexplained and worth chasing: check the decantation before/after dips, then the calibration chart, then the dispenser.
+- So ~43 L of the shortfall is unexplained and worth chasing: check the decantation before/after dips, then the calibration chart, then the dispenser.
 
-This is the useful output of daily accounting: not "the day balanced", but "48 litres are missing and here are the three things to check before tomorrow".
+This is the useful output of daily accounting: not "the day balanced", but "43 litres are missing and here are the three things to check before tomorrow".
 
 ## Day close and freezing
 

@@ -1,0 +1,11 @@
+{
+  "name": "petrol-bunk-accounts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Day-to-day account keeping for an Indian petrol bunk: shift settlement, day close, frozen DSR.",
+  "scripts": {
+    "start": "python3 -m http.server 8123 --directory app",
+    "test": "node --test --test-isolation=none test/"
+  }
+}

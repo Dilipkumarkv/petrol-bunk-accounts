@@ -17,6 +17,8 @@ Written as a build-ready brief: the last section is a data model you can impleme
 | [docs/sources.md](docs/sources.md) | All sources, with what each one was used for |
 | [data/schema.sql](data/schema.sql) | Starter SQLite schema (shift, nozzle, dip, receipt, credit, expense) |
 | [templates/dsr-shift.csv](templates/dsr-shift.csv) | A blank shift-DSR sheet you can open in Excel/Sheets |
+| [app/](app/) | Working offline app: shift settlement, day close, frozen DSR, CSV |
+| [test/](test/) | Unit tests for the reconciliation engine |
 
 ## The mental model: three ledgers, one truth
 
@@ -88,13 +90,33 @@ Open source is thin and mostly student/portfolio projects: no OSS project with r
 
 **Conclusion: this is a genuinely under-served niche for a well-built tool.** If you build it, the differentiator is the reconciliation maths (temperature-corrected stock, testing-litres handling, price-change revaluation), not the CRUD.
 
-## Proposed build (next steps)
+## The app
 
-If this becomes a software project, the useful shape is:
+A working, offline-first implementation of steps 1–3 below. No build step, no dependencies.
 
-1. **Shift settlement first** — nozzle readings, testing litres, payment split, per-attendant short/excess. Nothing else matters if this is slow.
-2. **Day close → frozen DSR** — once the business day is closed, the record is immutable; later expenses/payments carry their own audit trail.
-3. **Dip stock + variance** — opening + receipts − sales vs closing dip, with temperature/density correction and the MDG allowance calculation shown explicitly.
+```
+cd app && python3 -m http.server 8123    # open http://localhost:8123
+node --test --test-isolation=none test/  # 11 tests, run from the repo root
+```
+
+What it does today:
+
+- **Shift settlement** — nozzle readings with auto carry-forward from the last closed shift, testing litres, per-product value, tender split, live short/excess, attendant sign-off, and a remark requirement whenever the drawer does not balance.
+- **Day close** — tank opening/receipts/physical dip, book stock, variance with % and status (`within allowance` / `investigate` / `beyond MDG band`), day summary, and a hard block on closing while any shift is open or any dip is missing.
+- **Frozen DSR** — a deep-frozen snapshot saved at close, rendered read-only with per-nozzle lines, collections, handover signatures and stock variance. Printable, CSV-exportable.
+- **Setup** — outlet, OMC, tanks, nozzles, per-date rates, evaporation allowances. **Data** — JSON backup/restore, demo, erase.
+
+Deliberate limits: rates are per date (not per 06:00 revision inside a shift), no tanker/short-delivery module, no khata ledger, no temperature correction beyond the dip figure, storage is this browser only (export the JSON for a real backup). The schema in `data/schema.sql` is the fuller target model.
+
+### Engine design
+
+`app/core.mjs` is pure: no DOM, no storage, every function a function of its inputs. That is what makes the money maths testable — the 11 tests cover testing-litre subtraction, carry-forward mismatch, short/excess sign, half-entered rows, the MDG band and evaporation allowance, multi-shift aggregation, frozen-day immutability and CSV export.
+
+## Proposed build
+
+1. **Shift settlement first** — nozzle readings, testing litres, payment split, per-attendant short/excess. Nothing else matters if this is slow. *(done)*
+2. **Day close → frozen DSR** — once the business day is closed, the record is immutable; later expenses/payments carry their own audit trail. *(done)*
+3. **Dip stock + variance** — opening + receipts − sales vs closing dip, with temperature/density correction and the MDG allowance calculation shown explicitly. *(variance done; density/temperature correction pending)*
 4. **Receipts (tanker)** — invoice quantity vs decanted quantity, before/after dips, samples, short-delivery note.
 5. **Khata / credit ledger** — named, vehicle-linked, with ageing and reminders.
 6. **Density register, price-change notes, monthly stock reconciliation**, Tally/CSV export for the accountant.
@@ -103,4 +125,4 @@ If this becomes a software project, the useful shape is:
 
 ## Status
 
-Research and specification only. No application code yet.
+Research, specification and a working prototype: shift settlement, day close and frozen DSR are implemented and tested ([app/](app/)). Next: tanker receipts with short-delivery notes, the khata ledger, and Tally export.

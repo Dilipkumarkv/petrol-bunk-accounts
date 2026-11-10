@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Petrol Bunk Accounts</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">⛽</span>
+    <div>
+      <h1>Petrol Bunk Accounts</h1>
+      <p id="outlet-line" class="muted">—</p>
+    </div>
+  </div>
+  <div id="day-pill" class="pill" role="status">—</div>
+</header>
+
+<nav class="tabs" aria-label="Sections">
+  <button class="tab is-active" data-view="shift" type="button">Shift</button>
+  <button class="tab" data-view="day" type="button">Day close</button>
+  <button class="tab" data-view="dsr" type="button">DSR</button>
+  <button class="tab" data-view="setup" type="button">Setup</button>
+  <button class="tab" data-view="data" type="button">Data</button>
+</nav>
+
+<main>
+  <!-- ───────────── Shift settlement ───────────── -->
+  <section id="view-shift" class="view is-active">
+    <div class="bar">
+      <label class="field">
+        <span>Date</span>
+        <input type="date" id="shift-date" />
+      </label>
+      <label class="field">
+        <span>Shift</span>
+        <select id="shift-seq">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+        </select>
+      </label>
+      <div class="rates" id="shift-rates"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Nozzle readings</h2>
+        <div class="actions inline">
+          <span class="hint">Opening fills from the last closed shift</span>
+          <button class="btn ghost small" id="refresh-openings" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="grid" id="nozzle-table">
+          <thead>
+            <tr>
+              <th>Nozzle</th><th>Opening</th><th>Closing</th><th>Test</th>
+              <th class="num">Gross</th><th class="num">Net</th><th class="num">Value ₹</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <ul class="issues" id="shift-issues"></ul>
+      <div class="settlement" id="settlement"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Collections</h2></div>
+      <div class="tenders" id="tenders"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Handover</h2></div>
+      <div class="bar">
+        <label class="field grow">
+          <span>Attendant</span>
+          <input type="text" id="attendant" placeholder="Name on the drawer" autocomplete="off" />
+        </label>
+        <label class="field grow">
+          <span>Remark (required if short/excess)</span>
+          <input type="text" id="remark" placeholder="e.g. change shortage" autocomplete="off" />
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="signed" />
+        <span>Attendant has counted and signed for this drawer</span>
+      </label>
+      <div class="actions">
+        <button class="btn primary" id="close-shift" type="button">Close shift</button>
+        <button class="btn ghost" id="reset-shift" type="button">Discard draft</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Shifts today</h2></div>
+      <ul class="shift-list" id="shift-list"></ul>
+    </div>
+  </section>
+
+  <!-- ───────────── Day close ───────────── -->
+  <section id="view-day" class="view">
+    <div class="bar">
+      <label class="field">
+        <span>Business date</span>
+        <input type="date" id="day-date" />
+      </label>
+      <div class="hint" id="day-open-hint"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Tank dip &amp; variance</h2>
+        <span class="hint">Net sales come from the day's closed shifts</span>
+      </div>
+      <div class="table-wrap">
+        <table class="grid" id="tank-table">
+          <thead>
+            <tr>
+              <th>Tank</th><th>Opening</th><th>Receipts</th><th>Physical dip</th>
+              <th class="num">Book</th><th class="num">Var L</th><th class="num">Var %</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint" id="variance-note"></p>
+    </div>
+
+    <div class="card summary" id="day-summary"></div>
+
+    <div class="actions">
+      <button class="btn primary" id="close-day" type="button">Close day &amp; freeze DSR</button>
+    </div>
+    <p class="hint">A closed day is immutable. Later expenses and payments carry their own trail.</p>
+  </section>
+
+  <!-- ───────────── DSR ───────────── -->
+  <section id="view-dsr" class="view">
+    <div class="bar">
+      <label class="field">
+        <span>Business date</span>
+        <input type="date" id="dsr-date" />
+      </label>
+      <div class="actions inline">
+        <button class="btn ghost" id="print-dsr" type="button">Print</button>
+        <button class="btn ghost" id="csv-dsr" type="button">CSV</button>
+      </div>
+    </div>
+    <div id="dsr-body"></div>
+  </section>
+
+  <!-- ───────────── Setup ───────────── -->
+  <section id="view-setup" class="view">
+    <div class="card">
+      <div class="card-head"><h2>Outlet</h2></div>
+      <div class="bar">
+        <label class="field grow"><span>Name</span><input type="text" id="outlet-name" /></label>
+        <label class="field"><span>OMC</span>
+          <select id="outlet-omc">
+            <option value="IOCL">IOCL</option>
+            <option value="BPCL">BPCL</option>
+            <option value="HPCL">HPCL</option>
+            <option value="Nayara">Nayara</option>
+            <option value="Jio-bp">Jio-bp</option>
+            <option value="Shell">Shell</option>
+          </select>
+        </label>
+      </div>
+      <div class="bar">
+        <label class="field"><span>MS evaporation allowance %</span><input type="number" step="0.01" id="evap-ms" /></label>
+        <label class="field"><span>HSD evaporation allowance %</span><input type="number" step="0.01" id="evap-hsd" /></label>
+      </div>
+      <p class="hint">Defaults follow MDG §5.1.11 (MS 0.75% on quantity sold); set to your OMC's current figure.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Rates</h2><span class="hint">per litre, changes at 06:00</span></div>
+      <div class="bar">
+        <label class="field"><span>Date</span><input type="date" id="rate-date" /></label>
+        <label class="field"><span>MS ₹</span><input type="number" step="0.01" id="rate-ms" /></label>
+        <label class="field"><span>HSD ₹</span><input type="number" step="0.01" id="rate-hsd" /></label>
+        <button class="btn" id="save-rates" type="button">Save rates</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Tanks</h2></div>
+      <div id="tank-editor"></div>
+      <div class="actions">
+        <button class="btn ghost" id="add-tank" type="button">Add tank</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Nozzles</h2></div>
+      <div id="nozzle-editor"></div>
+      <div class="actions">
+        <button class="btn ghost" id="add-nozzle" type="button">Add nozzle</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── Data ───────────── -->
+  <section id="view-data" class="view">
+    <div class="card">
+      <div class="card-head"><h2>Backup</h2></div>
+      <p class="hint">Everything lives in this browser's storage. Export a JSON copy — that file is the real backup.</p>
+      <div class="actions">
+        <button class="btn primary" id="export-json" type="button">Export JSON</button>
+        <label class="btn ghost file">
+          Import JSON
+          <input type="file" id="import-json" accept="application/json" />
+        </label>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Demo &amp; reset</h2></div>
+      <p class="hint">Demo loads two tanks, four nozzles and today's rates with no shifts, so you can try the flow.</p>
+      <div class="actions">
+        <button class="btn ghost" id="load-demo" type="button">Load demo</button>
+        <button class="btn danger" id="reset-all" type="button">Erase all data</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Tests</h2></div>
+      <p class="hint">The reconciliation engine is covered by <code>node --test --test-isolation=none test/</code> —
+        testing litres, carry-forward, short/excess sign, MDG band, frozen-day immutability, CSV export.</p>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
