@@ -211,6 +211,12 @@ input:disabled { opacity: 0.6; }
 .chip.pending { background: var(--surface-2); color: var(--muted); }
 .chip.open { background: var(--warning-soft); color: var(--warning); }
 .chip.closed { background: var(--accent-soft); color: var(--accent); }
+.chip.due { background: var(--warning-soft); color: var(--warning); }
+.chip.over-limit { background: var(--danger-soft); color: var(--danger); }
+.chip.clear { background: var(--accent-soft); color: var(--accent); }
+.chip.advance { background: var(--surface-2); color: var(--muted); }
+.chip.inactive { background: var(--surface-2); color: var(--muted); }
+.grid .num.due { color: var(--danger); font-weight: 600; }
 
 /* ── tenders ───────────────────────────────────────────── */
 .tenders {
@@ -351,7 +357,7 @@ input:disabled { opacity: 0.6; }
 }
 
 @media print {
-  .topbar, .tabs, .bar, .actions, .toast, #view-shift, #view-day, #view-setup, #view-data { display: none !important; }
+  .topbar, .tabs, .bar, .actions, .toast, #view-shift, #view-day, #view-khata, #view-setup, #view-data { display: none !important; }
   body { background: #fff; color: #000; }
   #view-dsr { display: block !important; }
   .dsr-doc { border: 0; padding: 0; }

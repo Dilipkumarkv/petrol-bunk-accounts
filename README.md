@@ -4,7 +4,7 @@
 
 A working reference for **day-to-day account keeping at an Indian retail fuel outlet (petrol pump / petrol bunk)** — the registers, the daily rhythm, the arithmetic, the compliance points, and the software/tooling landscape.
 
-Built as a brief **and a working prototype**: the registers and the arithmetic are documented, and [app/](app/) implements shift settlement, day close and the frozen DSR. [data/schema.sql](data/schema.sql) is the fuller target model, and [AGENTS.md](AGENTS.md) records the conventions and invariants anyone (human or agent) should respect when changing the code.
+Built as a brief **and a working prototype**: the registers and the arithmetic are documented, and [app/](app/) implements shift settlement, day close, the frozen DSR and a customer-wise khata (credit) ledger. [data/schema.sql](data/schema.sql) is the fuller target model, and [AGENTS.md](AGENTS.md) records the conventions and invariants anyone (human or agent) should respect when changing the code.
 
 > Everything here is sourced from OMC guidelines (IOCL/HPCL MDG), dealer-facing guides and software vendors' own docs. Full links in [docs/sources.md](docs/sources.md). Figures marked *illustrative* are examples, not market data.
 
@@ -19,10 +19,11 @@ Built as a brief **and a working prototype**: the registers and the arithmetic a
 | [docs/sources.md](docs/sources.md) | All sources, with what each one was used for |
 | [data/schema.sql](data/schema.sql) | Starter SQLite schema (shift, nozzle, dip, receipt, credit, expense) |
 | [templates/dsr-shift.csv](templates/dsr-shift.csv) | A blank shift-DSR sheet you can open in Excel/Sheets |
-| [app/](app/) | Working offline app: shift settlement, day close, frozen DSR, CSV |
-| [test/](test/) | 22 unit and flow tests for the reconciliation engine |
+| [app/](app/) | Working offline app: shift settlement, day close, frozen DSR, khata credit ledger, CSV |
+| [test/](test/) | 42 unit, flow, backup-validation and khata tests for the reconciliation engine |
 | [index.html](index.html) | GitHub Pages landing page |
 | [AGENTS.md](AGENTS.md) | Conventions, invariants and commands for changing this repo |
+| [workflow.md](workflow.md) | Verified hardening report and prioritized feature roadmap |
 
 ## The mental model: three ledgers, one truth
 
@@ -96,12 +97,12 @@ Open source is thin and mostly student/portfolio projects: no OSS project with r
 
 ## The app
 
-A working, offline-first implementation of steps 1–3 below. No build step, no dependencies.
+A working, offline-first implementation of steps 1–3 and the first khata slice (step 5) below. No build step, no dependencies.
 
 **Hosted:** https://dilipkumarkv.github.io/petrol-bunk-accounts/app/
 
 ```bash
-npm test     # 22 tests
+npm test     # 42 tests
 npm start    # serves app/ at http://localhost:8123
 ```
 
@@ -115,23 +116,29 @@ No install and no build step — both scripts are thin wrappers over `node --tes
 - A short/excess needs a remark, and the attendant must sign before a shift closes.
 - A day close requires an explicit opening stock, a physical dip for every tank, and every shift closed and signed.
 - A closed shift keeps the rates and nozzle/tank mapping stamped at close, so later setup edits cannot revalue it; the DSR and its CSV come only from the frozen snapshot.
+- Tank and nozzle IDs must be unique, and evaporation allowances must be finite numbers of zero or more.
+- Startup and import apply the same backup validation, restore missing nested settings safely, and ignore open drafts when checking closed-shift carry-forward.
+- A shift's CREDIT tender must be fully allocated to known customers: allocation amounts are whole paise above zero and must sum exactly to the CREDIT amount. Closed shifts saved before khata existed (no allocation list) remain valid.
+- Customer IDs and receipt IDs must be unique; customers need a name, a whole-paise opening balance and a non-negative whole-paise credit limit; receipts must reference a known customer with a valid date, mode and a whole-paise amount above zero.
+- A receipt cannot exceed the customer's derived outstanding balance; overpayments are rejected at entry, not silently booked as an advance.
 
 What it does today:
 
 - **Shift settlement** — nozzle readings with auto carry-forward from the last closed shift, testing litres, per-product value, tender split, live short/excess, attendant sign-off, and a remark requirement whenever the drawer does not balance.
 - **Day close** — tank opening/receipts/physical dip, book stock, variance with % and status (`within allowance` / `investigate` / `beyond MDG band`), day summary, and a hard block on closing while any shift is open or any dip is missing.
 - **Frozen DSR** — a deep-frozen snapshot saved at close, rendered read-only with per-nozzle lines, collections, handover signatures and stock variance. Printable, CSV-exportable.
-- **Setup** — outlet, OMC, tanks, nozzles, per-date rates, evaporation allowances. **Data** — JSON backup/restore, demo, erase.
+- **Khata (credit ledger)** — customer master with opening balance and credit limit, customer-wise allocation of each shift's CREDIT tender at close, full/partial receipts by cash/UPI/card/bank, derived outstanding balances, a due/over-limit list, and a per-customer statement with CSV export. A credit sale is revenue at delivery; a later receipt settles receivables and is never counted as revenue again.
+- **Setup** — outlet, OMC, tanks, nozzles, per-date rates, non-negative evaporation allowances. **Data** — validated JSON backup/restore, demo reload with confirmation, erase.
 
-Deliberate limits: rates are per date (not per 06:00 revision inside a shift), no tanker/short-delivery module, no khata ledger, no temperature correction beyond the dip figure, storage is this browser only (export the JSON for a real backup). The schema in `data/schema.sql` is the fuller target model.
+Deliberate limits: rates are per date (not per 06:00 revision inside a shift), no tanker/short-delivery module, no expenditure or salary ledgers, khata has no reason-coded adjustments/write-offs or ageing yet, no temperature correction beyond the dip figure, storage is this browser only (export the JSON for a real backup). The schema in `data/schema.sql` is the fuller target model.
 
 ### Engine design
 
-`app/core.mjs` is pure: no DOM, no storage, every function a function of its inputs. That is what makes the money maths testable — the 22 tests cover testing-litre subtraction, carry-forward mismatch, short/excess sign, half-entered rows, the MDG band and evaporation allowance, multi-shift aggregation, frozen-day immutability, CSV export, and a full two-shift day across two HSD tanks.
+`app/core.mjs` is pure: no DOM, no storage, every function a function of its inputs. That is what makes the money maths testable — the 42 tests cover testing-litre subtraction, carry-forward mismatch, short/excess sign, half-entered rows, the MDG band and evaporation allowance, multi-shift aggregation, frozen-day immutability, CSV export, backup validation, nested settings defaults, a full two-shift day across two HSD tanks, and the khata ledger (derived balances, allocation sums, legacy grandfathering, receipts and overpayments, statements and CSV, due customers, and frozen-day allocation stamping).
 
-`validateShiftForClose()` is the single validation path: the close button, `freezeDay()` and backup import all call it, so a hand-edited export cannot bypass what the UI enforces. `test/flow.test.mjs` exercises whole days (both shifts, all tanks, next-day carry-forward) rather than single functions.
+`validateShiftForClose()` is the single validation path: the close button, `freezeDay()` and backup import all call it, so a hand-edited export cannot bypass what the UI enforces. Startup and import both use `validateBackup()` plus `normalizeState()`. `receiptIssues()` is the single entry-time path for khata receipts. `test/flow.test.mjs` exercises whole days, `test/backup.test.mjs` covers duplicate IDs, closed-only carry-forward and settings validation, and `test/khata.test.mjs` covers the credit ledger.
 
-Conventions that keep it correct are in [AGENTS.md](AGENTS.md): integer paise, litres at 3 decimals, net = gross − testing, book stock = opening + receipts − net sales, positive short, immutable closed days, and closed shifts only.
+Conventions that keep it correct are in [AGENTS.md](AGENTS.md): integer paise, litres at 3 decimals, net = gross − testing, book stock = opening + receipts − net sales, positive short, immutable closed days, closed shifts only, and khata balances derived from opening + allocations − receipts (a receipt is never new revenue).
 
 ## Proposed build
 
@@ -139,11 +146,11 @@ Conventions that keep it correct are in [AGENTS.md](AGENTS.md): integer paise, l
 2. **Day close → frozen DSR** — once the business day is closed, the record is immutable; later expenses/payments carry their own audit trail. *(done)*
 3. **Dip stock + variance** — opening + receipts − sales vs closing dip, with temperature/density correction and the MDG allowance calculation shown explicitly. *(variance done; density/temperature correction pending)*
 4. **Receipts (tanker)** — invoice quantity vs decanted quantity, before/after dips, samples, short-delivery note.
-5. **Khata / credit ledger** — named, vehicle-linked, with ageing and reminders.
+5. **Khata / credit ledger** — named, vehicle-linked, with ageing and reminders. *(first slice done: customers, shift credit allocation, receipts, derived balances, due list, statement + CSV; ageing/adjustments pending)*
 6. **Density register, price-change notes, monthly stock reconciliation**, Tally/CSV export for the accountant.
 
-`data/schema.sql` is a starting point for 1–5.
+`data/schema.sql` is a starting point for 1–5. See [workflow.md](workflow.md) for the verified hardening report and the prioritized expenditure, salary, credit and reporting roadmap.
 
 ## Status
 
-Research, specification and a working prototype: shift settlement, day close and frozen DSR are implemented, tested (22 tests) and hosted on GitHub Pages ([app/](app/)). Next: tanker receipts with short-delivery notes, the khata ledger, and Tally export.
+Research, specification and a working prototype: shift settlement, day close, frozen DSR and the first khata (credit) slice are implemented and tested (42 tests). The hosted GitHub Pages build ([app/](app/)) reflects the last published commit; the khata slice is local and uncommitted until separately authorized. Next: khata ageing/adjustments, tanker receipts with short-delivery notes, expenditure and salary ledgers, and Tally export.

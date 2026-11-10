@@ -22,6 +22,7 @@
   <button class="tab is-active" data-view="shift" type="button">Shift</button>
   <button class="tab" data-view="day" type="button">Day close</button>
   <button class="tab" data-view="dsr" type="button">DSR</button>
+  <button class="tab" data-view="khata" type="button">Khata</button>
   <button class="tab" data-view="setup" type="button">Setup</button>
   <button class="tab" data-view="data" type="button">Data</button>
 </nav>
@@ -71,6 +72,18 @@
     <div class="card">
       <div class="card-head"><h2>Collections</h2></div>
       <div class="tenders" id="tenders"></div>
+    </div>
+
+    <div class="card" id="credit-card" hidden>
+      <div class="card-head">
+        <h2>Credit (khata) allocation</h2>
+        <span class="hint" id="credit-hint"></span>
+      </div>
+      <div id="credit-allocations"></div>
+      <div class="actions">
+        <button class="btn ghost" id="add-credit-line" type="button">Add customer line</button>
+      </div>
+      <p class="hint">Split the credit tender across customers. Allocations must total the credit amount exactly before the shift can close.</p>
     </div>
 
     <div class="card">
@@ -154,6 +167,66 @@
     <div id="dsr-body"></div>
   </section>
 
+  <!-- ───────────── Khata (customer credit) ───────────── -->
+  <section id="view-khata" class="view">
+    <div class="card">
+      <div class="card-head">
+        <h2>Customers</h2>
+        <span class="hint" id="khata-total"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="grid" id="customer-table">
+          <thead>
+            <tr>
+              <th>Customer</th><th class="num">Balance ₹</th><th class="num">Limit ₹</th>
+              <th>Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint">Positive balance = the customer owes the outlet. Balances are derived: opening + closed-shift credit sales − receipts. A receipt settles a due; it is never a new sale.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Add customer</h2></div>
+      <div class="bar">
+        <label class="field grow"><span>Name</span><input type="text" id="customer-name" autocomplete="off" /></label>
+        <label class="field"><span>Phone (optional)</span><input type="text" id="customer-phone" autocomplete="off" /></label>
+        <label class="field"><span>Vehicle (optional)</span><input type="text" id="customer-vehicle" autocomplete="off" /></label>
+      </div>
+      <div class="bar">
+        <label class="field"><span>Opening balance ₹</span><input type="number" step="0.01" id="customer-opening" placeholder="0.00" /></label>
+        <label class="field"><span>Credit limit ₹ (optional)</span><input type="number" min="0" step="0.01" id="customer-limit" placeholder="0.00" /></label>
+        <button class="btn" id="add-customer" type="button">Add customer</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Record receipt</h2></div>
+      <div class="bar">
+        <label class="field grow"><span>Customer</span><select id="receipt-customer"></select></label>
+        <label class="field"><span>Date</span><input type="date" id="receipt-date" /></label>
+        <label class="field"><span>Amount ₹</span><input type="number" min="0.01" step="0.01" id="receipt-amount" placeholder="0.00" /></label>
+        <label class="field"><span>Mode</span><select id="receipt-mode"></select></label>
+        <label class="field grow"><span>Reference (optional)</span><input type="text" id="receipt-reference" autocomplete="off" /></label>
+        <button class="btn primary" id="save-receipt" type="button">Save receipt</button>
+      </div>
+      <p class="hint">A receipt cannot exceed the customer's outstanding balance.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Statement</h2>
+        <div class="actions inline">
+          <select id="statement-customer" aria-label="Statement customer"></select>
+          <button class="btn ghost" id="csv-statement" type="button">CSV</button>
+        </div>
+      </div>
+      <div id="statement-body"></div>
+    </div>
+  </section>
+
   <!-- ───────────── Setup ───────────── -->
   <section id="view-setup" class="view">
     <div class="card">
@@ -172,8 +245,8 @@
         </label>
       </div>
       <div class="bar">
-        <label class="field"><span>MS evaporation allowance %</span><input type="number" step="0.01" id="evap-ms" /></label>
-        <label class="field"><span>HSD evaporation allowance %</span><input type="number" step="0.01" id="evap-hsd" /></label>
+        <label class="field"><span>MS evaporation allowance %</span><input type="number" min="0" step="0.01" id="evap-ms" /></label>
+        <label class="field"><span>HSD evaporation allowance %</span><input type="number" min="0" step="0.01" id="evap-hsd" /></label>
       </div>
       <p class="hint">Defaults follow MDG §5.1.11 (MS 0.75% on quantity sold); set to your OMC's current figure.</p>
     </div>
@@ -228,8 +301,8 @@
     </div>
     <div class="card">
       <div class="card-head"><h2>Tests</h2></div>
-      <p class="hint">The reconciliation engine is covered by <code>node --test --test-isolation=none test/</code> —
-        testing litres, carry-forward, short/excess sign, MDG band, frozen-day immutability, CSV export.</p>
+      <p class="hint">The reconciliation engine is covered by <code>node --test --test-isolation=none test/*.test.mjs</code> —
+        testing litres, carry-forward, short/excess sign, MDG band, frozen-day immutability, CSV export, backup validation and khata credit balances.</p>
     </div>
   </section>
 </main>

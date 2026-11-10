@@ -17,6 +17,15 @@ export const TENDERS = [
   { code: 'FLEET', label: 'Fleet card' },
 ];
 
+// How a khata customer can settle an outstanding balance. A receipt is a
+// collection against an existing due, never a new fuel sale.
+export const RECEIPT_MODES = [
+  { code: 'CASH', label: 'Cash' },
+  { code: 'UPI', label: 'UPI' },
+  { code: 'CARD', label: 'Card / POS' },
+  { code: 'BANK', label: 'Bank / NEFT' },
+];
+
 // MDG 5.1.11: variation is treated as beyond normal operation only outside
 // 4% of tank stock, after allowing evaporation/handling loss on quantity sold.
 export const MDG_TOLERANCE_PCT = 4;
@@ -170,6 +179,32 @@ export function validateShiftForClose(shift = {}, ctx = {}) {
   const summary = shiftSummary(shift, { nozzles, rates });
   if (summary.missingRateProducts.length) {
     issues.push(`Rate missing for ${summary.missingRateProducts.join(', ')}`);
+  }
+
+  // Khata: when a shift records credit allocations, they must name known
+  // customers, be whole paise above zero, and sum exactly to the CREDIT tender.
+  // Shifts closed before khata existed carry no `creditAllocations` key and are
+  // grandfathered; the UI stamps the key on every shift it closes from now on.
+  if (Array.isArray(shift.creditAllocations)) {
+    const creditTender = summary.collections.CREDIT || 0;
+    const known = Array.isArray(ctx.customers) ? new Set(ctx.customers.map((c) => c.id)) : null;
+    let allocated = 0;
+    for (const allocation of shift.creditAllocations) {
+      const amount = allocation?.amountPaise;
+      if (!Number.isInteger(amount) || amount <= 0) {
+        issues.push('Credit allocation amounts must be whole paise above zero.');
+      } else {
+        allocated += amount;
+      }
+      if (known && !known.has(allocation?.customerId)) {
+        issues.push(`Credit allocation references unknown customer ${allocation?.customerId}.`);
+      }
+    }
+    if (allocated !== creditTender) {
+      issues.push(
+        `Credit tender ₹${formatPaise(creditTender)} is not fully allocated to customers (allocated ₹${formatPaise(allocated)}).`,
+      );
+    }
   }
 
   if (ctx.requireSignoff) {
@@ -489,6 +524,7 @@ export function freezeDay(state, date, meta = {}) {
       nozzles: state.nozzles,
       rates: (state.rates || {})[date] || {},
       previousClosings,
+      customers: state.customers || [],
       requireSignoff: true,
     });
     if (issues.length > 0) {
@@ -510,6 +546,9 @@ export function freezeDay(state, date, meta = {}) {
         signedAt: s.signedAt || null,
         tenders: summary.collections,
         differencePaise: summary.differencePaise,
+        // The khata attribution is part of the signed settlement: copy it so a
+        // later working-state edit cannot rewrite who owed what at close.
+        creditAllocations: (s.creditAllocations || []).map((a) => ({ ...a })),
         lines: summary.lines.map((line) => ({ ...line })),
       };
     });
@@ -605,6 +644,136 @@ export function dsrCsv(snapshot) {
   return rows.map((row) => row.map((cell) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
 }
 
+/* ────────────────────────── khata (customer credit) ────────────────────────── */
+
+/**
+ * Outstanding balance for one customer, in paise. Positive = the customer owes
+ * the outlet. Derived, never stored: opening balance + credit sales from CLOSED
+ * shifts - receipts. Open drafts are provisional and stay out, exactly like the
+ * DSR. A credit sale is revenue at delivery; a later receipt only settles the
+ * receivable and is never counted as revenue again.
+ */
+export function customerBalancePaise(state, customerId) {
+  const customer = (state.customers || []).find((c) => c.id === customerId);
+  if (!customer) return 0;
+  let balance = Math.round(Number(customer.openingBalancePaise) || 0);
+  for (const shift of state.shifts || []) {
+    if (shift.status !== 'closed') continue;
+    for (const allocation of shift.creditAllocations || []) {
+      if (allocation && allocation.customerId === customerId) {
+        balance += Math.round(Number(allocation.amountPaise) || 0);
+      }
+    }
+  }
+  for (const receipt of state.creditReceipts || []) {
+    if (receipt && receipt.customerId === customerId) {
+      balance -= Math.round(Number(receipt.amountPaise) || 0);
+    }
+  }
+  return balance;
+}
+
+/**
+ * Problems worth blocking a khata receipt for. The single entry-time validation
+ * path used by the UI. Overpayment is rejected explicitly rather than silently
+ * pushing the customer into a negative (advance) balance.
+ */
+export function receiptIssues(state, receipt = {}) {
+  const issues = [];
+  const customer = (state.customers || []).find((c) => c.id === receipt.customerId);
+  if (!customer) issues.push('Choose a known customer for the receipt.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(receipt.date || ''))) issues.push('Receipt date is invalid.');
+  if (!Number.isInteger(receipt.amountPaise) || receipt.amountPaise <= 0) {
+    issues.push('Receipt amount must be whole paise above zero.');
+  }
+  if (!RECEIPT_MODES.some((m) => m.code === receipt.mode)) issues.push('Receipt mode is invalid.');
+  if (customer && Number.isInteger(receipt.amountPaise) && receipt.amountPaise > 0) {
+    const balance = customerBalancePaise(state, customer.id);
+    if (receipt.amountPaise > balance) {
+      issues.push(
+        `Receipt ₹${formatPaise(receipt.amountPaise)} exceeds ${customer.name}'s outstanding balance of ₹${formatPaise(balance)}.`,
+      );
+    }
+  }
+  return issues;
+}
+
+/**
+ * A chronological statement for one customer: opening balance, then credit
+ * sales and receipts ordered by date (sales before receipts on the same day),
+ * with a running balance. Built only from closed shifts and recorded receipts.
+ */
+export function customerStatement(state, customerId) {
+  const customer = (state.customers || []).find((c) => c.id === customerId);
+  if (!customer) return { customer: null, entries: [], balancePaise: 0 };
+
+  const entries = [{
+    date: '', kind: 'opening', reference: 'Opening balance',
+    debitPaise: Math.round(Number(customer.openingBalancePaise) || 0), creditPaise: 0, order: 0,
+  }];
+  for (const shift of state.shifts || []) {
+    if (shift.status !== 'closed') continue;
+    for (const allocation of shift.creditAllocations || []) {
+      if (allocation && allocation.customerId === customerId) {
+        entries.push({
+          date: shift.date, kind: 'sale', reference: `Shift ${shift.seq}`,
+          debitPaise: Math.round(Number(allocation.amountPaise) || 0), creditPaise: 0, order: 1,
+        });
+      }
+    }
+  }
+  for (const receipt of state.creditReceipts || []) {
+    if (receipt && receipt.customerId === customerId) {
+      entries.push({
+        date: receipt.date, kind: 'receipt', reference: receipt.reference || receipt.mode,
+        debitPaise: 0, creditPaise: Math.round(Number(receipt.amountPaise) || 0), order: 2,
+      });
+    }
+  }
+  entries.sort((a, b) => (a.date || '').localeCompare(b.date || '') || a.order - b.order);
+
+  let balance = 0;
+  for (const entry of entries) {
+    balance += entry.debitPaise - entry.creditPaise;
+    entry.balancePaise = balance;
+    delete entry.order;
+  }
+  return { customer, entries, balancePaise: balance };
+}
+
+/** CSV statement for the accountant, derived from the same entries the UI shows. */
+export function customerStatementCsv(state, customerId) {
+  const { customer, entries, balancePaise } = customerStatement(state, customerId);
+  if (!customer) throw new Error('Unknown customer.');
+  const rows = [
+    ['customer', customer.name],
+    ['date', 'type', 'reference', 'debit_inr', 'credit_inr', 'balance_inr'],
+    ...entries.map((e) => [
+      e.date, e.kind, e.reference,
+      (e.debitPaise / 100).toFixed(2), (e.creditPaise / 100).toFixed(2), (e.balancePaise / 100).toFixed(2),
+    ]),
+    [],
+    ['balance_due_inr', (balancePaise / 100).toFixed(2)],
+  ];
+  return rows.map((row) => row.map((cell) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+}
+
+/**
+ * Customers who currently owe the outlet, largest balance first, each flagged
+ * when over their credit limit. Settled (zero) and advance (negative) balances
+ * are not "due" and stay out of this list.
+ */
+export function dueCustomers(state) {
+  return (state.customers || [])
+    .map((customer) => {
+      const balancePaise = customerBalancePaise(state, customer.id);
+      const limit = Number(customer.creditLimitPaise) || 0;
+      return { customer, balancePaise, overLimit: limit > 0 && balancePaise > limit };
+    })
+    .filter((d) => d.balancePaise > 0)
+    .sort((a, b) => b.balancePaise - a.balancePaise);
+}
+
 /**
  * Validate an imported backup document: structure first, then the same
  * accounting invariants the close button enforces, walked chronologically so
@@ -622,6 +791,7 @@ export function validateBackup(data) {
   const tankIds = new Set();
   for (const tank of data.tanks) {
     if (!tank || typeof tank.id !== 'string' || !tank.id) return 'a tank has no id';
+    if (tankIds.has(tank.id)) return `duplicate tank id ${tank.id}`;
     if (tank.product !== 'MS' && tank.product !== 'HSD') {
       return `tank ${tank.code || tank.id} has an unknown product`;
     }
@@ -629,11 +799,14 @@ export function validateBackup(data) {
   }
 
   if (!Array.isArray(data.nozzles)) return 'missing nozzles';
+  const nozzleIds = new Set();
   for (const nozzle of data.nozzles) {
     if (!nozzle || typeof nozzle.id !== 'string' || !nozzle.id) return 'a nozzle has no id';
+    if (nozzleIds.has(nozzle.id)) return `duplicate nozzle id ${nozzle.id}`;
     if (!tankIds.has(nozzle.tankId)) {
       return `nozzle ${nozzle.label || nozzle.id} points at a tank that does not exist`;
     }
+    nozzleIds.add(nozzle.id);
   }
 
   if (data.shifts !== undefined && !Array.isArray(data.shifts)) return 'shifts must be a list';
@@ -642,6 +815,53 @@ export function validateBackup(data) {
   }
   if (data.rates !== undefined && (typeof data.rates !== 'object' || data.rates === null || Array.isArray(data.rates))) {
     return 'rates must be an object';
+  }
+  if (data.settings != null && (typeof data.settings !== 'object' || Array.isArray(data.settings))) {
+    return 'settings must be an object';
+  }
+  const evaporationPct = data.settings?.evaporationPct;
+  if (evaporationPct != null) {
+    if (typeof evaporationPct !== 'object' || Array.isArray(evaporationPct)) {
+      return 'evaporation allowance must be an object';
+    }
+    for (const product of ['MS', 'HSD']) {
+      const value = evaporationPct[product];
+      if (value === undefined || value === null) continue;
+      if (value === '' || !Number.isFinite(Number(value)) || Number(value) < 0) {
+        return `${product} evaporation allowance must be a number of zero or more`;
+      }
+    }
+  }
+
+  if (data.customers !== undefined && !Array.isArray(data.customers)) return 'customers must be a list';
+  const customerIds = new Set();
+  for (const customer of data.customers || []) {
+    if (!customer || typeof customer.id !== 'string' || !customer.id) return 'a customer has no id';
+    if (customerIds.has(customer.id)) return `duplicate customer id ${customer.id}`;
+    if (typeof customer.name !== 'string' || !customer.name.trim()) return `customer ${customer.id} has no name`;
+    if (customer.openingBalancePaise !== undefined && customer.openingBalancePaise !== null
+      && !Number.isInteger(customer.openingBalancePaise)) {
+      return `customer ${customer.name} opening balance must be whole paise`;
+    }
+    if (customer.creditLimitPaise !== undefined && customer.creditLimitPaise !== null
+      && (!Number.isInteger(customer.creditLimitPaise) || customer.creditLimitPaise < 0)) {
+      return `customer ${customer.name} credit limit must be whole paise of zero or more`;
+    }
+    customerIds.add(customer.id);
+  }
+
+  if (data.creditReceipts !== undefined && !Array.isArray(data.creditReceipts)) return 'credit receipts must be a list';
+  const receiptIds = new Set();
+  for (const receipt of data.creditReceipts || []) {
+    if (!receipt || typeof receipt.id !== 'string' || !receipt.id) return 'a credit receipt has no id';
+    if (receiptIds.has(receipt.id)) return `duplicate receipt id ${receipt.id}`;
+    if (!customerIds.has(receipt.customerId)) return `receipt ${receipt.id} references unknown customer ${receipt.customerId}`;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(receipt.date || ''))) return `receipt ${receipt.id} has an invalid date`;
+    if (!Number.isInteger(receipt.amountPaise) || receipt.amountPaise <= 0) {
+      return `receipt ${receipt.id} amount must be whole paise above zero`;
+    }
+    if (!RECEIPT_MODES.some((m) => m.code === receipt.mode)) return `receipt ${receipt.id} has an invalid mode`;
+    receiptIds.add(receipt.id);
   }
 
   const shifts = [...(data.shifts || [])].sort(
@@ -655,24 +875,58 @@ export function validateBackup(data) {
       return 'a shift has an invalid sequence';
     }
     if (shift.status !== 'open' && shift.status !== 'closed') return 'a shift has an invalid status';
+    if (shift.creditAllocations !== undefined && !Array.isArray(shift.creditAllocations)) {
+      return `${shift.date} shift ${shift.seq}: credit allocations must be a list`;
+    }
 
     if (shift.status === 'closed') {
       const issues = validateShiftForClose(shift, {
         nozzles: data.nozzles,
         rates: (data.rates || {})[shift.date] || {},
         previousClosings: Object.fromEntries(lastClosing),
+        customers: data.customers || [],
       });
       if (issues.length > 0) {
         return `${shift.date} shift ${shift.seq}: ${issues[0]}`;
       }
-    }
 
-    for (const [nozzleId, reading] of Object.entries(shift.readings || {})) {
-      if (reading && reading.closing !== '' && reading.closing !== null && reading.closing !== undefined) {
-        lastClosing.set(nozzleId, Number(reading.closing));
+      // Draft closings are provisional: only a closed shift establishes the
+      // opening expected by the next closed shift, matching lastClosedReading.
+      for (const [nozzleId, reading] of Object.entries(shift.readings || {})) {
+        if (reading && reading.closing !== '' && reading.closing !== null && reading.closing !== undefined) {
+          lastClosing.set(nozzleId, Number(reading.closing));
+        }
       }
     }
   }
 
   return null;
+}
+
+/**
+ * Fill optional containers after a backup or saved state passes validation.
+ * Nested settings need defaults too: an empty settings object is valid input.
+ */
+export function normalizeState(data) {
+  const settings = data.settings || {};
+  const evaporationPct = settings.evaporationPct || {};
+  return {
+    ...data,
+    days: data.days || {},
+    shifts: data.shifts || [],
+    rates: data.rates || {},
+    customers: (data.customers || []).map((c) => ({
+      ...c,
+      openingBalancePaise: c.openingBalancePaise ?? 0,
+      active: c.active ?? true,
+    })),
+    creditReceipts: data.creditReceipts || [],
+    settings: {
+      ...settings,
+      evaporationPct: {
+        MS: Number(evaporationPct.MS ?? 0.75),
+        HSD: Number(evaporationPct.HSD ?? 0),
+      },
+    },
+  };
 }

@@ -1,18 +1,25 @@
 import {
   PRODUCTS,
   TENDERS,
+  RECEIPT_MODES,
   toPaise,
   formatPaise,
   formatLitres,
   nozzleLitres,
   validateShiftForClose,
   validateBackup,
+  normalizeState,
   shiftSummary,
   dayTotals,
   dayStock,
   freezeDay,
   lastClosedReading,
   dsrCsv,
+  customerBalancePaise,
+  receiptIssues,
+  customerStatement,
+  customerStatementCsv,
+  dueCustomers,
 } from './core.mjs';
 
 const STORE_KEY = 'petrolbunk.v1';
@@ -45,6 +52,11 @@ function demoState() {
     rates: { [date]: { MS: 10450, HSD: 9000 } },
     days: {},
     shifts: [],
+    customers: [
+      { id: 'c1', name: 'Sharma Transport', phone: '', vehicle: 'KA 01 AB 1234', openingBalancePaise: 500000, creditLimitPaise: 2500000, active: true },
+      { id: 'c2', name: 'City Logistics', phone: '', vehicle: '', openingBalancePaise: 0, creditLimitPaise: 0, active: true },
+    ],
+    creditReceipts: [],
   };
 }
 
@@ -53,15 +65,15 @@ function load() {
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.tanks) || !Array.isArray(parsed.nozzles)) return null;
-    return parsed;
+    if (validateBackup(parsed)) return null;
+    return normalizeState(parsed);
   } catch {
     return null;
   }
 }
 
 let state = load() || demoState();
-let cur = { date: todayISO(), seq: 1, day: todayISO(), dsr: todayISO() };
+let cur = { date: todayISO(), seq: 1, day: todayISO(), dsr: todayISO(), statement: null };
 
 function save() {
   try {
@@ -100,6 +112,7 @@ function shiftFor(date, seq, create = true) {
       status: 'open',
       readings: {},
       tenders: {},
+      creditAllocations: [],
       attendant: '',
       remark: '',
       signedAt: null,
@@ -117,6 +130,7 @@ function blankShift(date, seq) {
     status: 'open',
     readings: {},
     tenders: {},
+    creditAllocations: [],
     attendant: '',
     remark: '',
     signedAt: null,
@@ -157,6 +171,11 @@ function renderShift() {
   const existing = shiftFor(cur.date, cur.seq, false);
   const shift = existing || blankShift(cur.date, cur.seq);
   if (existing) {
+    // An open draft saved before khata existed gains the allocation key so the
+    // close rule applies to it; closed legacy shifts are left untouched.
+    if (existing.status !== 'closed' && !Array.isArray(existing.creditAllocations)) {
+      existing.creditAllocations = [];
+    }
     refreshOpenings(shift);
     save();
   }
@@ -194,6 +213,8 @@ function renderShift() {
         ${locked ? 'disabled' : ''} placeholder="0.00" />
     </label>`).join('');
 
+  renderCreditCard(shift);
+
   $('#attendant').value = shift.attendant || '';
   $('#attendant').disabled = locked;
   $('#remark').value = shift.remark || '';
@@ -228,6 +249,7 @@ function updateShiftCalc() {
     <div><span>Collected</span><strong>₹${formatPaise(summary.collectedPaise)}</strong></div>
     <div class="${diffClass}"><span>${diffLabel}</span><strong>₹${formatPaise(Math.abs(diff))}</strong></div>`;
 
+  updateCreditHint(shift, summary);
   renderIssues(shift);
 }
 
@@ -257,6 +279,7 @@ function renderIssues(shift) {
       nozzles: state.nozzles,
       rates: ratesFor(cur.date),
       previousClosings,
+      customers: state.customers || [],
     }));
   }
   if (shift.status === 'closed') issues.length = 0;
@@ -291,6 +314,9 @@ function closeShift() {
   const shift = shiftFor(cur.date, cur.seq, false);
   if (!shift) return toast('No nozzle readings entered.', true);
   if (shift.status === 'closed') return toast('This shift is already closed.', true);
+  // Every shift closed from now on carries the allocation key, so the khata
+  // rule is enforced even for a draft created before the feature existed.
+  if (!Array.isArray(shift.creditAllocations)) shift.creditAllocations = [];
 
   const previousClosings = {};
   for (const nozzle of state.nozzles) {
@@ -300,6 +326,7 @@ function closeShift() {
     nozzles: state.nozzles,
     rates: ratesFor(cur.date),
     previousClosings,
+    customers: state.customers || [],
     requireSignoff: true,
   });
   if (issues.length) {
@@ -319,6 +346,7 @@ function closeShift() {
   toast(`Shift ${shift.seq} closed · ${summary.differencePaise === 0 ? 'balanced' : `₹${formatPaise(Math.abs(summary.differencePaise))} ${summary.differencePaise > 0 ? 'short' : 'excess'}`}`);
   renderShift();
   renderHeader();
+  renderKhata();
 }
 
 function discardDraft() {
@@ -328,6 +356,51 @@ function discardDraft() {
   save();
   toast('Draft discarded.');
   renderShift();
+}
+
+/* ────────────────────────── credit allocation (shift) ────────────────────────── */
+
+function renderCreditCard(shift) {
+  const locked = shift.status === 'closed' || isDayClosed(cur.date);
+  const allocations = shift.creditAllocations || [];
+  const customers = state.customers || [];
+  const rows = $('#credit-allocations');
+
+  if (!customers.length) {
+    rows.innerHTML = '<p class="hint">Add customers in the Khata tab before allocating credit.</p>';
+  } else {
+    rows.innerHTML = allocations.map((a, i) => `
+      <div class="bar" data-credit-row="${i}" style="margin-bottom:8px">
+        <label class="field grow"><span>Customer</span>
+          <select data-credit-customer="${i}" ${locked ? 'disabled' : ''} aria-label="Credit customer ${i + 1}">
+            <option value="">Choose…</option>
+            ${customers.map((c) => `<option value="${c.id}" ${c.id === a.customerId ? 'selected' : ''}>${esc(c.name)}${c.active === false ? ' (inactive)' : ''}</option>`).join('')}
+          </select></label>
+        <label class="field"><span>Amount ₹</span>
+          <input type="number" inputmode="decimal" step="0.01" min="0" data-credit-amount="${i}"
+            value="${a.amountPaise ? formatPaise(a.amountPaise) : ''}" ${locked ? 'disabled' : ''}
+            placeholder="0.00" aria-label="Credit amount ${i + 1}" /></label>
+        <button class="btn ghost small" data-remove-credit="${i}" type="button" ${locked ? 'disabled' : ''}>Remove</button>
+      </div>`).join('');
+  }
+  $('#add-credit-line').disabled = locked || !customers.length;
+  updateCreditHint(shift, shiftSummary(shift, { nozzles: state.nozzles, rates: ratesFor(cur.date) }));
+}
+
+function updateCreditHint(shift, summary) {
+  const card = $('#credit-card');
+  const credit = summary.collections.CREDIT || 0;
+  const allocations = shift.creditAllocations || [];
+  const allocated = allocations.reduce(
+    (sum, a) => sum + (Number.isInteger(a?.amountPaise) && a.amountPaise > 0 ? a.amountPaise : 0), 0,
+  );
+  const show = credit > 0 || allocations.length > 0;
+  card.hidden = !show;
+  if (!show) return;
+  const remaining = credit - allocated;
+  $('#credit-hint').textContent = remaining === 0
+    ? `Fully allocated ₹${formatPaise(credit)}.`
+    : `Allocated ₹${formatPaise(allocated)} of ₹${formatPaise(credit)} · ₹${formatPaise(Math.abs(remaining))} ${remaining > 0 ? 'remaining' : 'over'}.`;
 }
 
 /* ────────────────────────── day close ────────────────────────── */
@@ -553,6 +626,128 @@ function downloadFile(name, content, type) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/* ────────────────────────── khata (customer credit) ────────────────────────── */
+
+function renderKhata() {
+  renderCustomerTable();
+  renderKhataSelects();
+  renderStatement();
+}
+
+function renderCustomerTable() {
+  const customers = (state.customers || [])
+    .map((c) => ({ c, balance: customerBalancePaise(state, c.id), limit: Number(c.creditLimitPaise) || 0 }))
+    .sort((a, b) => b.balance - a.balance);
+  const due = customers.filter((x) => x.balance > 0);
+  const outstanding = due.reduce((sum, x) => sum + x.balance, 0);
+  $('#khata-total').textContent = `${due.length} due · outstanding ₹${formatPaise(outstanding)}`;
+
+  const tbody = $('#customer-table tbody');
+  if (!customers.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="hint">No customers yet. Add one below.</td></tr>';
+    return;
+  }
+  const labels = { inactive: 'inactive', 'over-limit': 'over limit', due: 'due', advance: 'advance', clear: 'clear' };
+  tbody.innerHTML = customers.map(({ c, balance, limit }) => {
+    const over = limit > 0 && balance > limit;
+    const status = c.active === false ? 'inactive' : balance > 0 ? (over ? 'over-limit' : 'due') : balance < 0 ? 'advance' : 'clear';
+    const sub = [c.phone, c.vehicle].filter(Boolean).join(' · ');
+    return `<tr>
+      <td class="nozzle-name">${esc(c.name)}${sub ? `<small>${esc(sub)}</small>` : ''}</td>
+      <td class="num ${balance > 0 ? 'due' : ''}">${formatPaise(balance)}</td>
+      <td class="num">${limit > 0 ? formatPaise(limit) : '—'}</td>
+      <td><span class="chip ${status}">${labels[status]}</span></td>
+      <td class="num">
+        <button class="btn ghost small" data-statement="${c.id}" type="button">Statement</button>
+        <button class="btn ghost small" data-toggle-active="${c.id}" type="button">${c.active === false ? 'Activate' : 'Deactivate'}</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function fillCustomerSelect(sel, selectedId) {
+  const customers = state.customers || [];
+  const prev = selectedId ?? sel.value;
+  sel.innerHTML = '<option value="">Choose…</option>'
+    + customers.map((c) => `<option value="${c.id}" ${c.id === prev ? 'selected' : ''}>${esc(c.name)}${c.active === false ? ' (inactive)' : ''}</option>`).join('');
+}
+
+function renderKhataSelects() {
+  fillCustomerSelect($('#receipt-customer'), $('#receipt-customer').value || null);
+  $('#receipt-mode').innerHTML = RECEIPT_MODES.map((m) => `<option value="${m.code}">${esc(m.label)}</option>`).join('');
+  if (!$('#receipt-date').value) $('#receipt-date').value = todayISO();
+  if (!cur.statement && (state.customers || []).length) cur.statement = state.customers[0].id;
+  fillCustomerSelect($('#statement-customer'), cur.statement);
+}
+
+function renderStatement() {
+  const body = $('#statement-body');
+  const { customer, entries, balancePaise } = customerStatement(state, cur.statement);
+  if (!customer) {
+    body.innerHTML = '<div class="empty-state">Add a customer to see a statement.</div>';
+    return;
+  }
+  const rows = entries.map((e) => `
+    <tr>
+      <td>${esc(e.date || '—')}</td><td>${esc(e.kind)}</td><td>${esc(e.reference)}</td>
+      <td class="num">${e.debitPaise ? formatPaise(e.debitPaise) : '—'}</td>
+      <td class="num">${e.creditPaise ? formatPaise(e.creditPaise) : '—'}</td>
+      <td class="num">${formatPaise(e.balancePaise)}</td>
+    </tr>`).join('');
+  body.innerHTML = `
+    <div class="table-wrap">
+      <table class="grid">
+        <thead><tr><th>Date</th><th>Type</th><th>Reference</th><th class="num">Debit ₹</th><th class="num">Credit ₹</th><th class="num">Balance ₹</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p class="hint">Outstanding: ₹${formatPaise(balancePaise)} (positive = the customer owes the outlet).</p>`;
+}
+
+function addCustomer() {
+  const name = $('#customer-name').value.trim();
+  if (!name) return toast('Customer name is required.', true);
+  const openingRaw = $('#customer-opening').value.trim();
+  const limitRaw = $('#customer-limit').value.trim();
+  const opening = openingRaw === '' ? 0 : Number(openingRaw);
+  const limit = limitRaw === '' ? 0 : Number(limitRaw);
+  if (!Number.isFinite(opening)) return toast('Opening balance must be a number.', true);
+  if (!Number.isFinite(limit) || limit < 0) return toast('Credit limit must be a number of zero or more.', true);
+
+  state.customers.push({
+    id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    name,
+    phone: $('#customer-phone').value.trim(),
+    vehicle: $('#customer-vehicle').value.trim(),
+    openingBalancePaise: toPaise(opening),
+    creditLimitPaise: toPaise(limit),
+    active: true,
+  });
+  save();
+  for (const id of ['#customer-name', '#customer-phone', '#customer-vehicle', '#customer-opening', '#customer-limit']) $(id).value = '';
+  renderKhata();
+  toast(`Customer "${name}" added.`);
+}
+
+function saveReceipt() {
+  const receipt = {
+    id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    customerId: $('#receipt-customer').value,
+    date: $('#receipt-date').value,
+    amountPaise: toPaise($('#receipt-amount').value),
+    mode: $('#receipt-mode').value,
+    reference: $('#receipt-reference').value.trim(),
+  };
+  const issues = receiptIssues(state, receipt);
+  if (issues.length) return toast(issues[0], true);
+  state.creditReceipts.push(receipt);
+  save();
+  $('#receipt-amount').value = '';
+  $('#receipt-reference').value = '';
+  renderKhata();
+  toast(`Receipt ₹${formatPaise(receipt.amountPaise)} recorded.`);
+}
+
 /* ────────────────────────── setup ────────────────────────── */
 
 function renderSetup() {
@@ -599,6 +794,7 @@ function switchView(name) {
   if (name === 'shift') renderShift();
   if (name === 'day') renderDay();
   if (name === 'dsr') renderDsr();
+  if (name === 'khata') renderKhata();
   if (name === 'setup') renderSetup();
 }
 
@@ -607,7 +803,19 @@ function renderAll() {
   renderShift();
   renderDay();
   renderDsr();
+  renderKhata();
   renderSetup();
+}
+
+function updateEvaporation(product, input) {
+  const value = Number(input.value);
+  if (input.value.trim() === '' || !Number.isFinite(value) || value < 0) {
+    input.value = state.settings.evaporationPct[product];
+    return toast('Evaporation allowance must be a number of zero or more.', true);
+  }
+  state.settings.evaporationPct[product] = value;
+  save();
+  updateDayCalc();
 }
 
 function wire() {
@@ -642,6 +850,38 @@ function wire() {
     shift.tenders[input.dataset.tender] = toPaise(input.value);
     save();
     updateShiftCalc();
+  });
+
+  const editCreditAllocation = (e) => {
+    const amount = e.target.closest('input[data-credit-amount]');
+    const customer = e.target.closest('select[data-credit-customer]');
+    if (!amount && !customer) return;
+    const shift = shiftFor(cur.date, cur.seq);
+    if (!Array.isArray(shift.creditAllocations)) shift.creditAllocations = [];
+    const i = Number(amount ? amount.dataset.creditAmount : customer.dataset.creditCustomer);
+    shift.creditAllocations[i] = shift.creditAllocations[i] || { customerId: '', amountPaise: 0 };
+    if (amount) shift.creditAllocations[i].amountPaise = toPaise(amount.value);
+    else shift.creditAllocations[i].customerId = customer.value;
+    save();
+    updateShiftCalc();
+  };
+  $('#credit-allocations').addEventListener('input', editCreditAllocation);
+  $('#credit-allocations').addEventListener('change', editCreditAllocation);
+  $('#credit-allocations').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-remove-credit]');
+    if (!btn) return;
+    const shift = shiftFor(cur.date, cur.seq);
+    shift.creditAllocations.splice(Number(btn.dataset.removeCredit), 1);
+    save();
+    renderCreditCard(shift);
+    updateShiftCalc();
+  });
+  $('#add-credit-line').addEventListener('click', () => {
+    const shift = shiftFor(cur.date, cur.seq);
+    if (!Array.isArray(shift.creditAllocations)) shift.creditAllocations = [];
+    shift.creditAllocations.push({ customerId: '', amountPaise: 0 });
+    save();
+    renderCreditCard(shift);
   });
 
   $('#attendant').addEventListener('input', (e) => {
@@ -701,6 +941,35 @@ function wire() {
     downloadFile(`dsr-${cur.dsr}.csv`, dsrCsv(snapshot), 'text/csv;charset=utf-8');
   });
 
+  // khata
+  $('#add-customer').addEventListener('click', addCustomer);
+  $('#save-receipt').addEventListener('click', saveReceipt);
+  $('#statement-customer').addEventListener('change', (e) => {
+    cur.statement = e.target.value;
+    renderStatement();
+  });
+  $('#csv-statement').addEventListener('click', () => {
+    if (!cur.statement) return toast('Choose a customer first.', true);
+    downloadFile(`khata-${cur.statement}.csv`, customerStatementCsv(state, cur.statement), 'text/csv;charset=utf-8');
+  });
+  $('#customer-table').addEventListener('click', (e) => {
+    const statement = e.target.closest('[data-statement]');
+    const toggle = e.target.closest('[data-toggle-active]');
+    if (statement) {
+      cur.statement = statement.dataset.statement;
+      renderKhataSelects();
+      renderStatement();
+      return;
+    }
+    if (toggle) {
+      const customer = state.customers.find((c) => c.id === toggle.dataset.toggleActive);
+      if (!customer) return;
+      customer.active = customer.active === false;
+      save();
+      renderKhata();
+    }
+  });
+
   // setup
   $('#outlet-name').addEventListener('input', (e) => {
     state.outlet.name = e.target.value;
@@ -712,16 +981,8 @@ function wire() {
     save();
     renderHeader();
   });
-  $('#evap-ms').addEventListener('change', (e) => {
-    state.settings.evaporationPct.MS = Number(e.target.value) || 0;
-    save();
-    updateDayCalc();
-  });
-  $('#evap-hsd').addEventListener('change', (e) => {
-    state.settings.evaporationPct.HSD = Number(e.target.value) || 0;
-    save();
-    updateDayCalc();
-  });
+  $('#evap-ms').addEventListener('change', (e) => updateEvaporation('MS', e.target));
+  $('#evap-hsd').addEventListener('change', (e) => updateEvaporation('HSD', e.target));
   $('#rate-date').addEventListener('change', renderSetup);
   $('#save-rates').addEventListener('click', () => {
     const date = $('#rate-date').value;
@@ -828,11 +1089,7 @@ function wire() {
         const parsed = JSON.parse(String(reader.result));
         const problem = validateBackup(parsed);
         if (problem) throw new Error(problem);
-        state = parsed;
-        state.days = state.days || {};
-        state.shifts = state.shifts || [];
-        state.rates = state.rates || {};
-        state.settings = state.settings || { evaporationPct: { MS: 0.75, HSD: 0 } };
+        state = normalizeState(parsed);
         save();
         renderAll();
         toast('Backup imported.');
@@ -844,10 +1101,8 @@ function wire() {
     e.target.value = '';
   });
   $('#load-demo').addEventListener('click', () => {
-    const hasData = state.shifts.length > 0
-      || Object.keys(state.days || {}).some((d) => state.days[d]?.dsr);
-    if (hasData && !window.confirm(
-      'Load demo data? This replaces every shift, day and frozen DSR on this device. Export a backup first if you need it.',
+    if (!window.confirm(
+      'Load demo data? This replaces the current outlet setup, rates, shifts, days, frozen DSRs, customers and khata receipts on this device. Export a backup first if you need them.',
     )) return;
     state = demoState();
     save();
@@ -855,7 +1110,7 @@ function wire() {
     toast('Demo data loaded.');
   });
   $('#reset-all').addEventListener('click', () => {
-    if (!window.confirm('Erase all saved shifts, days and DSRs on this device?')) return;
+    if (!window.confirm('Erase all saved shifts, days, DSRs, customers and khata receipts on this device?')) return;
     localStorage.removeItem(STORE_KEY);
     state = demoState();
     save();

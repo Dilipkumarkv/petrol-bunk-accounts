@@ -7,7 +7,7 @@ Working notes for AI coding agents — and for anyone picking this repo up cold.
 Two things in one tree:
 
 1. **A research report** on how day-to-day accounting actually works at an Indian petrol bunk (registers, DSR, dip variance, MDG compliance, tax, software landscape).
-2. **A working, offline prototype** of the first three steps: shift settlement → day close → frozen DSR, with the reconciliation maths isolated in a tested engine.
+2. **A working, offline prototype** of shift settlement → day close → frozen DSR, plus a customer-wise khata (credit) ledger, with the reconciliation maths isolated in a tested engine.
 
 - Live: https://dilipkumarkv.github.io/petrol-bunk-accounts/ (app at `/app/`)
 - Repo: https://github.com/Dilipkumarkv/petrol-bunk-accounts
@@ -16,7 +16,7 @@ Two things in one tree:
 
 | Task | Command | Notes |
 | --- | --- | --- |
-| Run tests | `npm test` | 22 tests, must stay green |
+| Run tests | `npm test` | 42 tests, must stay green |
 | Serve locally | `npm start` | Serves `app/` at http://localhost:8123 |
 | Deploy | `git push origin main` | GitHub Pages rebuilds automatically |
 
@@ -33,19 +33,21 @@ No `npm install`, no build step, no dependencies. If a change wants a dependency
 
 ```
 app/
-  core.mjs     pure engine: litres, money, variance, freeze, CSV. No DOM, no storage.
+  core.mjs     pure engine: litres, money, variance, freeze, khata balances, CSV. No DOM, no storage.
   app.js       DOM + localStorage only; imports core.mjs
-  index.html   five views: Shift, Day close, DSR, Setup, Data
+  index.html   six views: Shift, Day close, DSR, Khata, Setup, Data
   styles.css   light/dark, mobile-first
 test/
-  core.test.mjs  17 tests against the engine
-  flow.test.mjs  5 whole-day flow tests
+  core.test.mjs    17 tests against the engine
+  flow.test.mjs    5 whole-day flow tests
+  backup.test.mjs  5 backup/settings regression tests
+  khata.test.mjs   15 credit-ledger tests (balances, allocations, receipts, statements, freeze)
 data/schema.sql  fuller target model (SQLite) — NOT wired to the app
 docs/            research: registers, reconciliation, compliance, software, sources
 index.html       Pages landing page
 ```
 
-Storage: one JSON blob in `localStorage` under `petrolbunk.v1`, shaped by `demoState()` in `app.js`. There is no backend and no sync; Export JSON is the backup path.
+Storage: one JSON blob in `localStorage` under `petrolbunk.v1`, shaped by `demoState()` in `app.js`. It holds `tanks`, `nozzles`, `rates`, `days`, `shifts`, plus `customers` and `creditReceipts` for the khata ledger. There is no backend and no sync; Export JSON is the backup path.
 
 ## Invariants — do not break these
 
@@ -63,13 +65,19 @@ Storage: one JSON blob in `localStorage` under `petrolbunk.v1`, shaped by `demoS
 12. **Every active nozzle must be read.** An idle nozzle closes at `opening === closing` (testing must be 0); it is never silently skipped.
 13. **Rates must be finite and > 0.** A missing, zero or negative rate is a blocking error anywhere sales exist.
 14. **Opening stock is explicit.** `freezeDay()` rejects a day whose tank has no opening quantity; it is not silently treated as zero.
+15. **Saved state follows the same rules as imports.** `load()` and import call `validateBackup()` then `normalizeState()`. Tank/nozzle IDs are unique, only closed shifts establish carry-forward, nested settings receive defaults, and evaporation allowances are finite and non-negative.
+16. **Demo reload is destructive.** Always confirm, even when the outlet has setup but no shifts; demo replaces configuration as well as transactions.
+17. **Khata balances are derived, never stored.** Outstanding = opening balance + closed-shift credit allocations − receipts. There is no independently editable balance field; `customerBalancePaise()` is the single source.
+18. **A receipt is never new revenue.** A credit sale is revenue when fuel is dispensed (it is already in the shift's CREDIT tender and the DSR). A later customer payment settles receivables only — counting it as sales again double-counts revenue.
+19. **Credit allocations must sum to the tender.** When a shift carries a `creditAllocations` list, the amounts are whole paise above zero, reference known customers, and sum exactly to the CREDIT tender. `validateShiftForClose()` enforces this for the close button, `freezeDay()` and import alike. Closed shifts saved before khata existed (no `creditAllocations` key) are grandfathered and stay valid; the UI stamps the key on every shift it closes going forward.
+20. **Overpayments are rejected, not hidden.** `receiptIssues()` blocks a receipt larger than the derived outstanding balance at entry. Corrections are new attributed entries; reason-coded adjustments/write-offs are a later slice, not silent edits to a closed shift.
 
 If a request conflicts with one of these, say so and explain the trade-off instead of silently breaking it.
 
 ## Adding a feature
 
 1. Write the maths in `app/core.mjs` as a pure function.
-2. Add a test to `test/core.test.mjs` that pins the behaviour (including the failure case).
+2. Add a focused test under `test/` that pins the behaviour (including the failure case).
 3. Wire it in `app/app.js` — rendering and storage only.
 4. Update the docs that claim something about it (`README.md` and the relevant file in `docs/`).
 5. Run `npm test`, then drive the real flow in the browser.
